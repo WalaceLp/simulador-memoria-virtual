@@ -41,10 +41,11 @@ static void test_map_and_lookup(void)
 
     assert(result == 0);
 
-    const PageTableEntry *entry = page_table_lookup(
-        table,
-        0x0000000123456000ULL
-    );
+    const PageTableEntry *entry =
+        page_table_lookup(
+            table,
+            0x0000000123456000ULL
+        );
 
     assert(entry != NULL);
     assert(entry->present);
@@ -134,6 +135,143 @@ static void test_remap_existing_page(void)
     page_table_destroy(table);
 }
 
+static void test_unmap_existing_page(void)
+{
+    PageTable *table = page_table_create();
+
+    assert(table != NULL);
+
+    assert(page_table_map(table, 0x1000ULL, 1) == 0);
+    assert(page_table_lookup(table, 0x1000ULL) != NULL);
+
+    assert(page_table_unmap(table, 0x1000ULL) == 0);
+    assert(page_table_lookup(table, 0x1000ULL) == NULL);
+
+    page_table_destroy(table);
+}
+
+static void test_unmap_unmapped_page(void)
+{
+    PageTable *table = page_table_create();
+
+    assert(table != NULL);
+
+    assert(page_table_unmap(table, 0x9000ULL) == -1);
+
+    page_table_destroy(table);
+}
+
+static void test_unmap_preserves_other_page(void)
+{
+    PageTable *table = page_table_create();
+
+    assert(table != NULL);
+
+    assert(page_table_map(table, 0x1000ULL, 1) == 0);
+    assert(page_table_map(table, 0x2000ULL, 2) == 0);
+
+    assert(page_table_unmap(table, 0x1000ULL) == 0);
+
+    assert(page_table_lookup(table, 0x1000ULL) == NULL);
+
+    const PageTableEntry *remaining =
+        page_table_lookup(table, 0x2000ULL);
+
+    assert(remaining != NULL);
+    assert(remaining->frame_number == 2);
+
+    page_table_destroy(table);
+}
+
+static void test_unmap_prunes_empty_nodes(void)
+{
+    PageTable *table = page_table_create();
+
+    assert(table != NULL);
+
+    /*
+     * Antes de qualquer mapeamento existe somente a raiz.
+     */
+    assert(page_table_node_count(table) == 1);
+
+    assert(
+        page_table_map(
+            table,
+            0x0000000123456000ULL,
+            7
+        ) == 0
+    );
+
+    /*
+     * Raiz mais três nós criados de forma preguiçosa.
+     */
+    assert(page_table_node_count(table) == 4);
+
+    assert(
+        page_table_unmap(
+            table,
+            0x0000000123456000ULL
+        ) == 0
+    );
+
+    /*
+     * Após a poda, somente a raiz deve permanecer.
+     */
+    assert(page_table_node_count(table) == 1);
+
+    page_table_destroy(table);
+}
+
+static void test_remap_after_unmap(void)
+{
+    PageTable *table = page_table_create();
+
+    assert(table != NULL);
+
+    assert(page_table_map(table, 0x5000ULL, 10) == 0);
+    assert(page_table_unmap(table, 0x5000ULL) == 0);
+    assert(page_table_map(table, 0x5000ULL, 20) == 0);
+
+    const PageTableEntry *entry =
+        page_table_lookup(table, 0x5000ULL);
+
+    assert(entry != NULL);
+    assert(entry->frame_number == 20);
+
+    page_table_destroy(table);
+}
+
+static void test_unmap_address_inside_same_page(void)
+{
+    PageTable *table = page_table_create();
+
+    assert(table != NULL);
+
+    uint64_t page_start = 0x0000000123456000ULL;
+
+    assert(page_table_map(table, page_start, 30) == 0);
+
+    /*
+     * O endereço usado na remoção difere apenas no offset.
+     */
+    assert(
+        page_table_unmap(
+            table,
+            page_start + 0x321ULL
+        ) == 0
+    );
+
+    assert(page_table_lookup(table, page_start) == NULL);
+    assert(
+        page_table_lookup(
+            table,
+            page_start + 0xFFFULL
+        ) == NULL
+    );
+
+    page_table_destroy(table);
+}
+
 int main(void)
 {
     test_create_and_destroy();
@@ -142,6 +280,13 @@ int main(void)
     test_addresses_inside_same_page();
     test_multiple_mappings();
     test_remap_existing_page();
+
+    test_unmap_existing_page();
+    test_unmap_unmapped_page();
+    test_unmap_preserves_other_page();
+    test_unmap_prunes_empty_nodes();
+    test_remap_after_unmap();
+    test_unmap_address_inside_same_page();
 
     printf("Todos os testes de page_table passaram.\n");
 

@@ -2,6 +2,7 @@
 #define PAGE_TABLE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct PageTable PageTable;
@@ -26,6 +27,15 @@ int page_table_map(
 const PageTableEntry *page_table_lookup(
     const PageTable *table,
     uint64_t virtual_address
+);
+
+int page_table_unmap(
+    PageTable *table,
+    uint64_t virtual_address
+);
+
+size_t page_table_node_count(
+    const PageTable *table
 );
 
 void page_table_destroy(PageTable *table);
