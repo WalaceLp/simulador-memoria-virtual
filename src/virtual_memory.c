@@ -986,6 +986,172 @@ static int virtual_memory_replace_page(
     return 0;
 }
 
+static int virtual_memory_evict_cow_readers_for_write(
+    VirtualMemory *memory,
+    Process *writer,
+    uint64_t writer_virtual_page,
+    uint32_t source_frame,
+    const uint8_t *page_data
+)
+{
+    if (
+        memory == NULL ||
+        writer == NULL ||
+        page_data == NULL ||
+        memory->swap == NULL
+    ) {
+        return -1;
+    }
+
+    size_t mapping_count =
+        cow_manager_mapping_count(
+            memory->cow_manager,
+            source_frame
+        );
+
+    if (mapping_count <= 1) {
+        return 0;
+    }
+
+    CowMappingInfo *mappings = calloc(
+        mapping_count,
+        sizeof(CowMappingInfo)
+    );
+
+    if (mappings == NULL) {
+        return -1;
+    }
+
+    size_t collected =
+        cow_manager_collect_frame_mappings(
+            memory->cow_manager,
+            source_frame,
+            mappings,
+            mapping_count
+        );
+
+    if (collected != mapping_count) {
+        free(mappings);
+        return -1;
+    }
+
+    for (size_t index = 0; index < collected; index++) {
+        Process *process = mappings[index].process;
+        uint64_t virtual_page =
+            mappings[index].virtual_page;
+
+        if (
+            process == writer &&
+            virtual_page == writer_virtual_page
+        ) {
+            continue;
+        }
+
+        if (
+            swap_write_page(
+                memory->swap,
+                process_get_pid(process),
+                virtual_page,
+                page_data
+            ) != 0
+        ) {
+            free(mappings);
+            return -1;
+        }
+
+        memory->stats.swap_writes++;
+    }
+
+    for (size_t index = 0; index < collected; index++) {
+        Process *process = mappings[index].process;
+        uint64_t virtual_page =
+            mappings[index].virtual_page;
+
+        if (
+            process == writer &&
+            virtual_page == writer_virtual_page
+        ) {
+            continue;
+        }
+
+        if (
+            virtual_page >
+            (UINT64_MAX >> PAGE_OFFSET_BITS)
+        ) {
+            free(mappings);
+            return -1;
+        }
+
+        uint64_t virtual_address =
+            virtual_page << PAGE_OFFSET_BITS;
+
+        PageTable *table =
+            process_get_page_table(process);
+
+        if (
+            table == NULL ||
+            page_table_unmap(
+                table,
+                virtual_address
+            ) != 0
+        ) {
+            free(mappings);
+            return -1;
+        }
+
+        if (
+            cow_manager_remove_mapping(
+                memory->cow_manager,
+                source_frame,
+                process,
+                virtual_page
+            ) != 0
+        ) {
+            free(mappings);
+            return -1;
+        }
+
+        tlb_invalidate(
+            memory->tlb,
+            process_get_pid(process),
+            virtual_page
+        );
+    }
+
+    const PhysicalFrame *source =
+        physical_memory_get_frame(
+            memory->physical_memory,
+            source_frame
+        );
+
+    if (
+        source != NULL &&
+        source->owner_process != writer
+    ) {
+        if (
+            virtual_memory_reassign_frame_owner(
+                memory,
+                source_frame,
+                writer,
+                writer_virtual_page
+            ) != 0
+        ) {
+            free(mappings);
+            return -1;
+        }
+    }
+
+    free(mappings);
+
+    return
+        cow_manager_mapping_count(
+            memory->cow_manager,
+            source_frame
+        ) == 1
+            ? 0
+            : -1;
+}
+
 static int virtual_memory_handle_cow_write(
     VirtualMemory *memory,
     Process *process,
@@ -1030,14 +1196,50 @@ static int virtual_memory_handle_cow_write(
     uint32_t new_frame =
         INVALID_FRAME_NUMBER;
 
-    if (
+    int allocation_result =
         physical_memory_allocate_frame(
             memory->physical_memory,
             process,
             virtual_page,
             &new_frame
-        ) != 0
-    ) {
+        );
+
+    if (allocation_result == -2) {
+        if (
+            virtual_memory_evict_cow_readers_for_write(
+                memory,
+                process,
+                virtual_page,
+                source_frame,
+                page_data
+            ) != 0
+        ) {
+            return -1;
+        }
+
+        tlb_invalidate(
+            memory->tlb,
+            process_get_pid(process),
+            virtual_page
+        );
+
+        if (
+            tlb_insert(
+                memory->tlb,
+                process_get_pid(process),
+                virtual_page,
+                source_frame
+            ) != 0
+        ) {
+            return -1;
+        }
+
+        *result_frame = source_frame;
+
+        return 0;
+    }
+
+    if (allocation_result != 0) {
         return -1;
     }
 

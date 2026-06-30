@@ -771,3 +771,66 @@ Por fim, foi criado o experimento automatizado da anomalia de Belady com a sequ�
 
 ```text
 1 2 3 4 1 2 5 1 2 3 4 5
+```
+
+
+## 30/06
+
+### Objetivos do dia
+
+* Corrigir o comportamento do copy-on-write quando a memória física está cheia.
+* Adicionar teste integrado para o caso limite com apenas um quadro físico.
+* Atualizar a documentação para refletir o estado real da implementação.
+
+### Atividades realizadas
+
+Foi implementado um caminho específico para escrita COW quando não há quadros
+livres. Antes da correção, a escrita em uma página compartilhada falhava se
+`physical_memory_allocate_frame()` não encontrasse quadro disponível.
+
+Agora, quando o processo escritor precisa assumir o quadro compartilhado, o
+simulador grava no swap a versão antiga da página para os demais processos que
+compartilhavam aquele quadro. Em seguida, remove os mapeamentos desses processos
+da tabela de páginas, invalida as entradas correspondentes da TLB e mantém o
+quadro físico com o processo que realizou a escrita.
+
+Com isso, os processos que não escreveram passam a recuperar sua versão antiga
+por page fault e swap-in quando acessarem a página novamente.
+
+### Decisões de projeto
+
+Foi adicionada ao `CowManager` uma função para coletar os mapeamentos ativos de
+um quadro físico. Essa enumeração permite que a memória virtual encontre todos
+os processos afetados por um COW em memória cheia.
+
+Foi decidido manter a substituição comum de quadros compartilhados como uma
+pendência separada. O caso corrigido nesta etapa é a escrita COW sobre um quadro
+compartilhado quando não existe quadro livre para a cópia.
+
+### Testes realizados
+
+Foi criado um teste integrado em `tests/test_cow_integration.c` com apenas um
+quadro físico. O teste valida o seguinte fluxo:
+
+* o pai escreve uma página;
+* o filho é criado por fork e compartilha a página;
+* o filho escreve na página com a memória física cheia;
+* o valor antigo do pai é preservado via swap;
+* pai e filho continuam lendo seus próprios valores após ciclos de swap-in e
+  swap-out.
+
+Também foram executados:
+
+* `make bin/test_cow_integration && ./bin/test_cow_integration`;
+* `make test`;
+* `valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 ./bin/test_cow_integration`.
+
+Todos passaram sem erros. O Valgrind reportou ausência de vazamentos e
+`ERROR SUMMARY: 0 errors`.
+
+### Uso de IA
+
+O Codex foi utilizado para revisar o fluxo de COW, propor a estratégia de
+preservar os leitores no swap e implementar a correção com testes. A decisão
+foi restringir a mudança ao caso de escrita COW com memória cheia, mantendo as
+demais pendências explícitas para etapas posteriores.

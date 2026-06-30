@@ -271,6 +271,8 @@ Os resultados dos experimentos principais ficam em:
 - Processos com PID e tabela de paginas propria.
 - Fork com compartilhamento estrutural inicial da trie.
 - Copy-on-write fisico quando existe quadro livre para a copia.
+- Copy-on-write fisico com memoria cheia, preservando os demais processos via
+  swap quando o quadro compartilhado precisa ficar com o processo escritor.
 - Memoria fisica com quadros ocupados/livres, PID, pagina virtual, bits de
   referencia/modificacao e conteudo real da pagina.
 - TLB por chave `(PID, pagina virtual)`.
@@ -290,11 +292,11 @@ Os resultados dos experimentos principais ficam em:
 
 Estas limitacoes devem ser consideradas na defesa e em proximas evolucoes:
 
-- O COW fisico funciona quando existe quadro livre para a copia, mas ainda nao
-  resolve completamente o caso em que a memoria fisica esta cheia.
 - A substituicao de paginas recusa vitimas com mais de um mapeamento COW. Esse
   comportamento evita corromper processos compartilhando um quadro, mas limita a
-  integracao entre COW, substituicao e swap.
+  integracao entre substituicao comum, COW e swap.
+- O COW com memoria cheia depende de swap configurado; sem swap, nao ha onde
+  preservar a copia antiga dos processos que nao escreveram.
 - O estresse do CLI valida consistencia matematica das metricas, mas nao valida
   preservacao byte a byte de todos os valores escritos.
 - A validacao estrutural verifica o proprietario fisico principal do quadro, mas

@@ -215,6 +215,39 @@ size_t cow_manager_mapping_count(
     return count;
 }
 
+size_t cow_manager_collect_frame_mappings(
+    const CowManager *manager,
+    uint32_t frame_number,
+    CowMappingInfo *mappings,
+    size_t capacity
+)
+{
+    if (
+        manager == NULL ||
+        frame_number >= manager->frame_count
+    ) {
+        return 0;
+    }
+
+    size_t count = 0;
+
+    const CowMapping *mapping =
+        manager->frames[frame_number];
+
+    while (mapping != NULL) {
+        if (mappings != NULL && count < capacity) {
+            mappings[count].process = mapping->process;
+            mappings[count].virtual_page =
+                mapping->virtual_page;
+        }
+
+        count++;
+        mapping = mapping->next;
+    }
+
+    return count;
+}
+
 int cow_manager_share_process_pages(
     CowManager *manager,
     const Process *parent,

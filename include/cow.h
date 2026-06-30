@@ -9,6 +9,11 @@
 
 typedef struct CowManager CowManager;
 
+typedef struct {
+    Process *process;
+    uint64_t virtual_page;
+} CowMappingInfo;
+
 CowManager *cow_manager_create(
     size_t frame_count
 );
@@ -41,6 +46,13 @@ bool cow_manager_has_mapping(
 size_t cow_manager_mapping_count(
     const CowManager *manager,
     uint32_t frame_number
+);
+
+size_t cow_manager_collect_frame_mappings(
+    const CowManager *manager,
+    uint32_t frame_number,
+    CowMappingInfo *mappings,
+    size_t capacity
 );
 
 int cow_manager_share_process_pages(

@@ -290,10 +290,132 @@ static void test_parent_write_does_not_change_child(void)
     virtual_memory_destroy(memory);
 }
 
+static void test_cow_write_with_full_physical_memory(void)
+{
+    VirtualMemory *memory =
+        virtual_memory_create_complete(
+            1,
+            REPLACEMENT_FIFO,
+            2,
+            COW_SWAP_PATH,
+            8,
+            true
+        );
+
+    Process *parent =
+        process_create(20);
+
+    assert(memory != NULL);
+    assert(parent != NULL);
+
+    assert(
+        virtual_memory_write_byte(
+            memory,
+            parent,
+            0x3123ULL,
+            10
+        ) == 0
+    );
+
+    Process *child = NULL;
+
+    assert(
+        virtual_memory_fork_process(
+            memory,
+            parent,
+            21,
+            &child
+        ) == 0
+    );
+
+    assert(child != NULL);
+
+    /*
+     * Com apenas um quadro físico, a escrita COW do filho
+     * precisa preservar a página antiga do pai no swap.
+     */
+    assert(
+        virtual_memory_write_byte(
+            memory,
+            child,
+            0x3123ULL,
+            20
+        ) == 0
+    );
+
+    uint8_t value = 0;
+
+    assert(
+        virtual_memory_read_byte(
+            memory,
+            child,
+            0x3123ULL,
+            &value
+        ) == 0
+    );
+
+    assert(value == 20);
+
+    value = 0;
+
+    assert(
+        virtual_memory_read_byte(
+            memory,
+            parent,
+            0x3123ULL,
+            &value
+        ) == 0
+    );
+
+    assert(value == 10);
+
+    value = 0;
+
+    assert(
+        virtual_memory_read_byte(
+            memory,
+            child,
+            0x3123ULL,
+            &value
+        ) == 0
+    );
+
+    assert(value == 20);
+
+    const VirtualMemoryStats *stats =
+        virtual_memory_get_stats(memory);
+
+    assert(stats != NULL);
+    assert(stats->swap_writes >= 2);
+    assert(stats->swap_reads >= 2);
+
+    assert(virtual_memory_validate(memory));
+
+    assert(
+        virtual_memory_release_process(
+            memory,
+            child
+        ) == 0
+    );
+
+    process_destroy(child);
+
+    assert(
+        virtual_memory_release_process(
+            memory,
+            parent
+        ) == 0
+    );
+
+    process_destroy(parent);
+    virtual_memory_destroy(memory);
+}
+
 int main(void)
 {
     test_fork_shares_page_until_write();
     test_parent_write_does_not_change_child();
+    test_cow_write_with_full_physical_memory();
 
     printf(
         "Todos os testes integrados de COW passaram.\n"
