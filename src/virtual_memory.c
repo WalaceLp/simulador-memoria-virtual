@@ -936,3 +936,109 @@ double virtual_memory_average_page_walk_levels(
         (double)memory->stats.page_walk_levels /
         (double)memory->stats.page_walks;
 }
+
+bool virtual_memory_validate(
+    const VirtualMemory *memory
+)
+{
+    if (
+        memory == NULL ||
+        memory->physical_memory == NULL ||
+        memory->replacement_policy == NULL ||
+        memory->tlb == NULL
+    ) {
+        return false;
+    }
+
+    size_t frame_count =
+        physical_memory_frame_count(
+            memory->physical_memory
+        );
+
+    size_t counted_free_frames = 0;
+
+    for (
+        size_t index = 0;
+        index < frame_count;
+        index++
+    ) {
+        const PhysicalFrame *frame =
+            physical_memory_get_frame(
+                memory->physical_memory,
+                (uint32_t)index
+            );
+
+        if (frame == NULL) {
+            return false;
+        }
+
+        if (!frame->occupied) {
+            counted_free_frames++;
+
+            if (
+                frame->owner_pid != -1 ||
+                frame->owner_process != NULL ||
+                frame->dirty ||
+                frame->referenced
+            ) {
+                return false;
+            }
+
+            continue;
+        }
+
+        if (
+            frame->owner_process == NULL ||
+            frame->owner_pid < 0
+        ) {
+            return false;
+        }
+
+        if (
+            process_get_pid(frame->owner_process) !=
+            frame->owner_pid
+        ) {
+            return false;
+        }
+
+        PageTable *page_table =
+            process_get_page_table(
+                frame->owner_process
+            );
+
+        if (page_table == NULL) {
+            return false;
+        }
+
+        if (
+            frame->virtual_page >
+            (UINT64_MAX >> PAGE_OFFSET_BITS)
+        ) {
+            return false;
+        }
+
+        uint64_t virtual_address =
+            frame->virtual_page <<
+            PAGE_OFFSET_BITS;
+
+        const PageTableEntry *entry =
+            page_table_lookup(
+                page_table,
+                virtual_address
+            );
+
+        if (
+            entry == NULL ||
+            !entry->present ||
+            entry->frame_number !=
+                (uint32_t)index
+        ) {
+            return false;
+        }
+    }
+
+    return counted_free_frames ==
+           physical_memory_free_frame_count(
+               memory->physical_memory
+           );
+}

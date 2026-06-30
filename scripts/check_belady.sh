@@ -21,10 +21,7 @@ get_page_faults() {
             current_frames = $3
             page_faults = $11
 
-            if (
-                current_policy == target_policy &&
-                current_frames == target_frames
-            ) {
+            if (current_policy == target_policy && current_frames == target_frames) {
                 gsub(/"/, "", page_faults)
                 print page_faults
                 exit
@@ -49,6 +46,7 @@ if [[ -z "$lru_3" || -z "$lru_4" ]]; then
 fi
 
 echo "=== Resultado do experimento ==="
+
 printf "%-10s %-10s %-12s\n" \
     "Política" \
     "Quadros" \
@@ -92,22 +90,35 @@ if (( lru_4 <= lru_3 )); then
     echo "$lru_4 page faults com 4 quadros."
 else
     echo
-    echo "Aviso: resultado inesperado para o LRU."
+    echo "Erro: resultado inesperado para o LRU."
     exit 1
 fi
 
-if (
-    [[ "$fifo_3" -ne 9 ]] ||
-    [[ "$fifo_4" -ne 10 ]] ||
-    [[ "$lru_3" -ne 10 ]] ||
-    [[ "$lru_4" -ne 8 ]]
-); then
+if [[ "$fifo_3" -ne 9 ]]; then
     echo
-    echo "Aviso: os resultados diferem dos valores clássicos:"
-    echo "FIFO 3 = 9"
-    echo "FIFO 4 = 10"
-    echo "LRU 3 = 10"
-    echo "LRU 4 = 8"
+    echo "Erro: FIFO com 3 quadros deveria produzir 9 page faults."
+    echo "Resultado obtido: $fifo_3"
+    exit 1
+fi
+
+if [[ "$fifo_4" -ne 10 ]]; then
+    echo
+    echo "Erro: FIFO com 4 quadros deveria produzir 10 page faults."
+    echo "Resultado obtido: $fifo_4"
+    exit 1
+fi
+
+if [[ "$lru_3" -ne 10 ]]; then
+    echo
+    echo "Erro: LRU com 3 quadros deveria produzir 10 page faults."
+    echo "Resultado obtido: $lru_3"
+    exit 1
+fi
+
+if [[ "$lru_4" -ne 8 ]]; then
+    echo
+    echo "Erro: LRU com 4 quadros deveria produzir 8 page faults."
+    echo "Resultado obtido: $lru_4"
     exit 1
 fi
 

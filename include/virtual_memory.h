@@ -119,4 +119,8 @@ double virtual_memory_average_page_walk_levels(
     const VirtualMemory *memory
 );
 
+bool virtual_memory_validate(
+    const VirtualMemory *memory
+);
+
 #endif
