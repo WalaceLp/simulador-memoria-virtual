@@ -6,6 +6,7 @@
 
 #include "physical_memory.h"
 #include "process.h"
+#include "replacement.h"
 
 typedef enum {
     VM_ACCESS_READ = 0,
@@ -25,13 +26,21 @@ typedef struct {
     uint64_t total_accesses;
     uint64_t read_accesses;
     uint64_t write_accesses;
+
     uint64_t page_faults;
+    uint64_t replacements;
+    uint64_t dirty_evictions;
 } VirtualMemoryStats;
 
 typedef struct VirtualMemory VirtualMemory;
 
 VirtualMemory *virtual_memory_create(
     size_t frame_count
+);
+
+VirtualMemory *virtual_memory_create_with_policy(
+    size_t frame_count,
+    ReplacementPolicyType policy_type
 );
 
 void virtual_memory_destroy(
@@ -50,6 +59,10 @@ const VirtualMemoryStats *virtual_memory_get_stats(
 );
 
 const PhysicalMemory *virtual_memory_get_physical_memory(
+    const VirtualMemory *memory
+);
+
+const char *virtual_memory_policy_name(
     const VirtualMemory *memory
 );
 

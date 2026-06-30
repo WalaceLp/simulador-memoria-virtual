@@ -7,12 +7,16 @@
 
 #define INVALID_FRAME_NUMBER UINT32_MAX
 
+typedef struct Process Process;
+
 typedef struct {
     bool occupied;
     bool dirty;
     bool referenced;
 
     int owner_pid;
+    Process *owner_process;
+
     uint64_t virtual_page;
 } PhysicalFrame;
 
@@ -36,9 +40,16 @@ size_t physical_memory_free_frame_count(
 
 int physical_memory_allocate_frame(
     PhysicalMemory *memory,
-    int owner_pid,
+    Process *owner_process,
     uint64_t virtual_page,
     uint32_t *frame_number
+);
+
+int physical_memory_replace_frame(
+    PhysicalMemory *memory,
+    uint32_t frame_number,
+    Process *new_owner_process,
+    uint64_t new_virtual_page
 );
 
 int physical_memory_release_frame(
