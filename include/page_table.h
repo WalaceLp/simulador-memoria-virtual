@@ -18,6 +18,12 @@ typedef struct {
 
 PageTable *page_table_create(void);
 
+PageTable *page_table_retain(PageTable *table);
+
+size_t page_table_reference_count(
+    const PageTable *table
+);
+
 int page_table_map(
     PageTable *table,
     uint64_t virtual_address,

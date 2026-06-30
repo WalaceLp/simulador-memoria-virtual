@@ -7,6 +7,11 @@ typedef struct Process Process;
 
 Process *process_create(int pid);
 
+Process *process_fork(
+    const Process *parent,
+    int child_pid
+);
+
 int process_get_pid(const Process *process);
 
 PageTable *process_get_page_table(Process *process);

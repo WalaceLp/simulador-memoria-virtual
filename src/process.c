@@ -31,6 +31,35 @@ Process *process_create(int pid)
     return process;
 }
 
+Process *process_fork(
+    const Process *parent,
+    int child_pid
+)
+{
+    if (parent == NULL || child_pid < 0) {
+        return NULL;
+    }
+
+    Process *child = calloc(1, sizeof(Process));
+
+    if (child == NULL) {
+        return NULL;
+    }
+
+    child->page_table = page_table_retain(
+        parent->page_table
+    );
+
+    if (child->page_table == NULL) {
+        free(child);
+        return NULL;
+    }
+
+    child->pid = child_pid;
+
+    return child;
+}
+
 int process_get_pid(const Process *process)
 {
     if (process == NULL) {

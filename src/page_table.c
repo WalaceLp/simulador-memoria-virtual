@@ -12,6 +12,7 @@ typedef struct PageTableNode {
 
 struct PageTable {
     PageTableNode *root;
+    size_t reference_count;
 };
 
 static PageTableNode *page_table_node_create(unsigned int level)
@@ -68,7 +69,31 @@ PageTable *page_table_create(void)
         return NULL;
     }
 
+    table->reference_count = 1;
+
     return table;
+}
+
+PageTable *page_table_retain(PageTable *table)
+{
+    if (table == NULL) {
+        return NULL;
+    }
+
+    table->reference_count++;
+
+    return table;
+}
+
+size_t page_table_reference_count(
+    const PageTable *table
+)
+{
+    if (table == NULL) {
+        return 0;
+    }
+
+    return table->reference_count;
 }
 
 int page_table_map(
@@ -79,6 +104,10 @@ int page_table_map(
 {
     if (table == NULL || table->root == NULL) {
         return -1;
+    }
+
+    if (table->reference_count > 1) {
+        return -2;
     }
 
     PageTableNode *current = table->root;
@@ -183,6 +212,9 @@ int page_table_unmap(
         return -1;
     }
 
+    if (table->reference_count > 1) {
+        return -2;
+    }
     /*
      * nodes guarda cada nó visitado.
      *
@@ -327,6 +359,11 @@ static void page_table_node_destroy(PageTableNode *node)
 void page_table_destroy(PageTable *table)
 {
     if (table == NULL) {
+        return;
+    }
+
+    if (table->reference_count > 1) {
+        table->reference_count--;
         return;
     }
 
