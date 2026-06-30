@@ -6,6 +6,7 @@
 #include "physical_memory.h"
 #include "process.h"
 #include "replacement.h"
+#include "swap.h"
 #include "tlb.h"
 #include "virtual_memory.h"
 
@@ -15,6 +16,7 @@ struct VirtualMemory {
     PhysicalMemory *physical_memory;
     ReplacementPolicy *replacement_policy;
     Tlb *tlb;
+    Swap *swap;
 
     VirtualMemoryStats stats;
 };
@@ -29,10 +31,13 @@ static bool virtual_memory_access_type_is_valid(
     );
 }
 
-VirtualMemory *virtual_memory_create_with_policy_and_tlb(
+static VirtualMemory *virtual_memory_create_internal(
     size_t frame_count,
     ReplacementPolicyType policy_type,
-    size_t tlb_entries
+    size_t tlb_entries,
+    const char *swap_path,
+    size_t swap_slots,
+    bool remove_swap_on_destroy
 )
 {
     if (frame_count == 0 || tlb_entries == 0) {
@@ -88,7 +93,70 @@ VirtualMemory *virtual_memory_create_with_policy_and_tlb(
         return NULL;
     }
 
+    if (swap_path != NULL && swap_slots > 0) {
+        memory->swap = swap_create(
+            swap_path,
+            swap_slots,
+            remove_swap_on_destroy
+        );
+
+        if (memory->swap == NULL) {
+            tlb_destroy(memory->tlb);
+
+            replacement_policy_destroy(
+                memory->replacement_policy
+            );
+
+            physical_memory_destroy(
+                memory->physical_memory
+            );
+
+            free(memory);
+
+            return NULL;
+        }
+    }
+
     return memory;
+}
+
+VirtualMemory *virtual_memory_create_complete(
+    size_t frame_count,
+    ReplacementPolicyType policy_type,
+    size_t tlb_entries,
+    const char *swap_path,
+    size_t swap_slots,
+    bool remove_swap_on_destroy
+)
+{
+    if (swap_path == NULL || swap_slots == 0) {
+        return NULL;
+    }
+
+    return virtual_memory_create_internal(
+        frame_count,
+        policy_type,
+        tlb_entries,
+        swap_path,
+        swap_slots,
+        remove_swap_on_destroy
+    );
+}
+
+VirtualMemory *virtual_memory_create_with_policy_and_tlb(
+    size_t frame_count,
+    ReplacementPolicyType policy_type,
+    size_t tlb_entries
+)
+{
+    return virtual_memory_create_internal(
+        frame_count,
+        policy_type,
+        tlb_entries,
+        NULL,
+        0,
+        false
+    );
 }
 
 VirtualMemory *virtual_memory_create_with_policy(
@@ -121,6 +189,7 @@ void virtual_memory_destroy(
         return;
     }
 
+    swap_destroy(memory->swap);
     tlb_destroy(memory->tlb);
 
     replacement_policy_destroy(
@@ -146,6 +215,110 @@ static void virtual_memory_register_access(
     } else {
         memory->stats.write_accesses++;
     }
+}
+
+static int virtual_memory_restore_page(
+    VirtualMemory *memory,
+    Process *process,
+    uint64_t virtual_page,
+    uint32_t frame_number
+)
+{
+    if (
+        memory->swap == NULL ||
+        !swap_contains_page(
+            memory->swap,
+            process_get_pid(process),
+            virtual_page
+        )
+    ) {
+        return 0;
+    }
+
+    uint8_t page_data[PAGE_SIZE];
+
+    if (
+        swap_read_page(
+            memory->swap,
+            process_get_pid(process),
+            virtual_page,
+            page_data
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        physical_memory_write_page(
+            memory->physical_memory,
+            frame_number,
+            page_data,
+            PAGE_SIZE
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        swap_remove_page(
+            memory->swap,
+            process_get_pid(process),
+            virtual_page
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    memory->stats.swap_reads++;
+
+    return 0;
+}
+
+static int virtual_memory_save_victim(
+    VirtualMemory *memory,
+    const PhysicalFrame *victim,
+    uint32_t victim_frame
+)
+{
+    if (
+        memory == NULL ||
+        victim == NULL ||
+        !victim->dirty
+    ) {
+        return 0;
+    }
+
+    if (memory->swap == NULL) {
+        return 0;
+    }
+
+    uint8_t page_data[PAGE_SIZE];
+
+    if (
+        physical_memory_read_page(
+            memory->physical_memory,
+            victim_frame,
+            page_data,
+            PAGE_SIZE
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        swap_write_page(
+            memory->swap,
+            victim->owner_pid,
+            victim->virtual_page,
+            page_data
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    memory->stats.swap_writes++;
+
+    return 0;
 }
 
 static int virtual_memory_notify_access(
@@ -227,10 +400,11 @@ static int virtual_memory_load_free_frame(
     }
 
     if (
-        physical_memory_mark_access(
-            memory->physical_memory,
-            frame_number,
-            is_write
+        virtual_memory_restore_page(
+            memory,
+            process,
+            virtual_page,
+            frame_number
         ) != 0
     ) {
         replacement_policy_on_evict(
@@ -252,6 +426,16 @@ static int virtual_memory_load_free_frame(
     }
 
     if (
+        physical_memory_mark_access(
+            memory->physical_memory,
+            frame_number,
+            is_write
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
         tlb_insert(
             memory->tlb,
             process_get_pid(process),
@@ -259,21 +443,6 @@ static int virtual_memory_load_free_frame(
             frame_number
         ) != 0
     ) {
-        replacement_policy_on_evict(
-            memory->replacement_policy,
-            frame_number
-        );
-
-        page_table_unmap(
-            page_table,
-            virtual_address
-        );
-
-        physical_memory_release_frame(
-            memory->physical_memory,
-            frame_number
-        );
-
         return -1;
     }
 
@@ -319,12 +488,21 @@ static int virtual_memory_replace_page(
         victim->owner_process;
 
     int old_pid = victim->owner_pid;
-
     uint64_t old_virtual_page =
         victim->virtual_page;
 
     bool victim_was_dirty =
         victim->dirty;
+
+    if (
+        virtual_memory_save_victim(
+            memory,
+            victim,
+            victim_frame
+        ) != 0
+    ) {
+        return -1;
+    }
 
     PageTable *old_page_table =
         process_get_page_table(old_process);
@@ -352,10 +530,6 @@ static int virtual_memory_replace_page(
         return -1;
     }
 
-    /*
-     * A entrada antiga da TLB deve ser removida antes
-     * que o quadro passe a representar outra página.
-     */
     tlb_invalidate(
         memory->tlb,
         old_pid,
@@ -399,6 +573,17 @@ static int virtual_memory_replace_page(
     if (
         replacement_policy_on_load(
             memory->replacement_policy,
+            victim_frame
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        virtual_memory_restore_page(
+            memory,
+            new_process,
+            new_virtual_page,
             victim_frame
         ) != 0
     ) {
@@ -477,9 +662,6 @@ VirtualMemoryAccessResult virtual_memory_access(
     uint32_t frame_number =
         INVALID_FRAME_NUMBER;
 
-    /*
-     * Primeiro consulta a TLB.
-     */
     if (
         tlb_lookup(
             memory->tlb,
@@ -518,9 +700,6 @@ VirtualMemoryAccessResult virtual_memory_access(
     memory->stats.page_walk_levels +=
         levels_visited;
 
-    /*
-     * TLB miss, mas a página estava na tabela.
-     */
     if (entry != NULL) {
         frame_number = entry->frame_number;
 
@@ -548,9 +727,6 @@ VirtualMemoryAccessResult virtual_memory_access(
         return VM_ACCESS_OK;
     }
 
-    /*
-     * A página não está presente na tabela.
-     */
     memory->stats.page_faults++;
 
     int allocation_result =
@@ -572,7 +748,9 @@ VirtualMemoryAccessResult virtual_memory_access(
                 is_write
             ) != 0
         ) {
-            return VM_ACCESS_INTERNAL_ERROR;
+            return memory->swap != NULL
+                ? VM_ACCESS_SWAP_ERROR
+                : VM_ACCESS_INTERNAL_ERROR;
         }
 
         return VM_ACCESS_PAGE_FAULT;
@@ -588,13 +766,93 @@ VirtualMemoryAccessResult virtual_memory_access(
                 is_write
             ) != 0
         ) {
-            return VM_ACCESS_INTERNAL_ERROR;
+            return memory->swap != NULL
+                ? VM_ACCESS_SWAP_ERROR
+                : VM_ACCESS_INTERNAL_ERROR;
         }
 
         return VM_ACCESS_PAGE_FAULT;
     }
 
     return VM_ACCESS_INTERNAL_ERROR;
+}
+
+int virtual_memory_read_byte(
+    VirtualMemory *memory,
+    Process *process,
+    uint64_t virtual_address,
+    uint8_t *value
+)
+{
+    if (value == NULL) {
+        return -1;
+    }
+
+    VirtualMemoryAccessResult result =
+        virtual_memory_access(
+            memory,
+            process,
+            virtual_address,
+            VM_ACCESS_READ
+        );
+
+    if (result < 0) {
+        return -1;
+    }
+
+    const PageTableEntry *entry =
+        page_table_lookup(
+            process_get_page_table(process),
+            virtual_address
+        );
+
+    if (entry == NULL) {
+        return -1;
+    }
+
+    return physical_memory_read_byte(
+        memory->physical_memory,
+        entry->frame_number,
+        address_offset(virtual_address),
+        value
+    );
+}
+
+int virtual_memory_write_byte(
+    VirtualMemory *memory,
+    Process *process,
+    uint64_t virtual_address,
+    uint8_t value
+)
+{
+    VirtualMemoryAccessResult result =
+        virtual_memory_access(
+            memory,
+            process,
+            virtual_address,
+            VM_ACCESS_WRITE
+        );
+
+    if (result < 0) {
+        return -1;
+    }
+
+    const PageTableEntry *entry =
+        page_table_lookup(
+            process_get_page_table(process),
+            virtual_address
+        );
+
+    if (entry == NULL) {
+        return -1;
+    }
+
+    return physical_memory_write_byte(
+        memory->physical_memory,
+        entry->frame_number,
+        address_offset(virtual_address),
+        value
+    );
 }
 
 const VirtualMemoryStats *virtual_memory_get_stats(
@@ -617,6 +875,17 @@ const PhysicalMemory *virtual_memory_get_physical_memory(
     }
 
     return memory->physical_memory;
+}
+
+const Swap *virtual_memory_get_swap(
+    const VirtualMemory *memory
+)
+{
+    if (memory == NULL) {
+        return NULL;
+    }
+
+    return memory->swap;
 }
 
 const char *virtual_memory_policy_name(

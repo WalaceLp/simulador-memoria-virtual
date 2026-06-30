@@ -68,4 +68,32 @@ const PhysicalFrame *physical_memory_get_frame(
     uint32_t frame_number
 );
 
+int physical_memory_read_page(
+    const PhysicalMemory *memory,
+    uint32_t frame_number,
+    uint8_t *page_data,
+    size_t page_size
+);
+
+int physical_memory_write_page(
+    PhysicalMemory *memory,
+    uint32_t frame_number,
+    const uint8_t *page_data,
+    size_t page_size
+);
+
+int physical_memory_read_byte(
+    const PhysicalMemory *memory,
+    uint32_t frame_number,
+    uint16_t offset,
+    uint8_t *value
+);
+
+int physical_memory_write_byte(
+    PhysicalMemory *memory,
+    uint32_t frame_number,
+    uint16_t offset,
+    uint8_t value
+);
+
 #endif
