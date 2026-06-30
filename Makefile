@@ -28,11 +28,16 @@ COMMON_SOURCES = \
 
 all: bin/vmsim
 
-bin/vmsim: src/main.c $(COMMON_SOURCES) src/trace.c
+bin/vmsim: \
+	src/main.c \
+	src/cli.c \
+	src/trace.c \
+	$(COMMON_SOURCES)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) \
 		-Isrc/replacement \
 		src/main.c \
+		src/cli.c \
 		src/trace.c \
 		$(COMMON_SOURCES) \
 		-o bin/vmsim
@@ -47,7 +52,8 @@ test: \
 	bin/test_swap \
 	bin/test_virtual_memory \
 	bin/test_trace \
-	bin/test_swap_integration
+	bin/test_swap_integration \
+	bin/test_cli
 	./bin/test_address
 	./bin/test_page_table
 	./bin/test_process
@@ -58,8 +64,11 @@ test: \
 	./bin/test_virtual_memory
 	./bin/test_trace
 	./bin/test_swap_integration
+	./bin/test_cli
 
-bin/test_address: tests/test_address.c src/address.c
+bin/test_address: \
+	tests/test_address.c \
+	src/address.c
 	@mkdir -p bin
 	$(CC) $(CFLAGS) \
 		tests/test_address.c \
@@ -118,11 +127,13 @@ bin/test_tlb: \
 
 bin/test_swap: \
 	tests/test_swap.c \
-	src/swap.c
+	src/swap.c \
+	src/address.c
 	@mkdir -p bin
 	$(CC) $(CFLAGS) \
 		tests/test_swap.c \
 		src/swap.c \
+		src/address.c \
 		-o bin/test_swap
 
 bin/test_virtual_memory: \
@@ -157,6 +168,15 @@ bin/test_swap_integration: \
 		$(COMMON_SOURCES) \
 		-o bin/test_swap_integration
 
+bin/test_cli: \
+	tests/test_cli.c \
+	src/cli.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) \
+		tests/test_cli.c \
+		src/cli.c \
+		-o bin/test_cli
+
 stress:
 	@echo "Testes de estresse serão concluídos na etapa 12."
 
@@ -164,39 +184,57 @@ valgrind: test
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
+		./bin/test_address
+
+	valgrind --leak-check=full \
+		--show-leak-kinds=all \
+		--error-exitcode=1 \
 		./bin/test_page_table
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_process
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_physical_memory
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_replacement
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_tlb
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_swap
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_virtual_memory
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_trace
+
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_swap_integration
+
+	valgrind --leak-check=full \
+		--show-leak-kinds=all \
+		--error-exitcode=1 \
+		./bin/test_cli
 
 clean:
 	rm -rf bin build
