@@ -24,9 +24,15 @@ COMMON_SOURCES = \
 	$(MEMORY_SOURCES) \
 	$(REPLACEMENT_SOURCES)
 
-.PHONY: all test stress clean valgrind
+.PHONY: \
+	all \
+	test \
+	stress \
+	valgrind \
+	belady \
+	clean
 
-all: bin/vmsim
+all: bin/vmsim bin/tracegen
 
 bin/vmsim: \
 	src/main.c \
@@ -44,6 +50,17 @@ bin/vmsim: \
 		$(COMMON_SOURCES) \
 		-o bin/vmsim
 
+bin/tracegen: \
+	src/tracegen_main.c \
+	src/trace_generator.c \
+	src/address.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) \
+		src/tracegen_main.c \
+		src/trace_generator.c \
+		src/address.c \
+		-o bin/tracegen
+
 test: \
 	bin/test_address \
 	bin/test_page_table \
@@ -56,7 +73,8 @@ test: \
 	bin/test_trace \
 	bin/test_swap_integration \
 	bin/test_cli \
-	bin/test_csv_export
+	bin/test_csv_export \
+	bin/test_trace_generator
 	./bin/test_address
 	./bin/test_page_table
 	./bin/test_process
@@ -69,6 +87,7 @@ test: \
 	./bin/test_swap_integration
 	./bin/test_cli
 	./bin/test_csv_export
+	./bin/test_trace_generator
 
 bin/test_address: \
 	tests/test_address.c \
@@ -131,13 +150,11 @@ bin/test_tlb: \
 
 bin/test_swap: \
 	tests/test_swap.c \
-	src/swap.c \
-	src/address.c
+	src/swap.c
 	@mkdir -p bin
 	$(CC) $(CFLAGS) \
 		tests/test_swap.c \
 		src/swap.c \
-		src/address.c \
 		-o bin/test_swap
 
 bin/test_virtual_memory: \
@@ -195,10 +212,28 @@ bin/test_csv_export: \
 		$(COMMON_SOURCES) \
 		-o bin/test_csv_export
 
+bin/test_trace_generator: \
+	tests/test_trace_generator.c \
+	src/trace_generator.c \
+	src/address.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) \
+		tests/test_trace_generator.c \
+		src/trace_generator.c \
+		src/address.c \
+		-o bin/test_trace_generator
+
+belady: all
+	./scripts/run_belady.sh
+
 stress:
-	@echo "Testes de estresse serao concluidos na parte 5/6 da etapa 12."
+	@echo "Testes de estresse serão implementados na etapa 12.5."
 
 valgrind: test
+	valgrind --leak-check=full \
+		--show-leak-kinds=all \
+		--error-exitcode=1 \
+		./bin/test_address
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
@@ -243,6 +278,10 @@ valgrind: test
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_csv_export
+	valgrind --leak-check=full \
+		--show-leak-kinds=all \
+		--error-exitcode=1 \
+		./bin/test_trace_generator
 
 clean:
 	rm -rf bin build
