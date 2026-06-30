@@ -53,6 +53,12 @@ const PageTableEntry *page_table_lookup(
     uint64_t virtual_address
 );
 
+const PageTableEntry *page_table_lookup_with_levels(
+    const PageTable *table,
+    uint64_t virtual_address,
+    size_t *levels_visited
+);
+
 int page_table_unmap(
     PageTable *table,
     uint64_t virtual_address

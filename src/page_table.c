@@ -444,11 +444,16 @@ int page_table_map(
     return 0;
 }
 
-const PageTableEntry *page_table_lookup(
+const PageTableEntry *page_table_lookup_with_levels(
     const PageTable *table,
-    uint64_t virtual_address
+    uint64_t virtual_address,
+    size_t *levels_visited
 )
 {
+    if (levels_visited != NULL) {
+        *levels_visited = 0;
+    }
+
     if (table == NULL || table->root == NULL) {
         return NULL;
     }
@@ -460,6 +465,10 @@ const PageTableEntry *page_table_lookup(
         level < PAGE_TABLE_LEVELS - 1;
         level++
     ) {
+        if (levels_visited != NULL) {
+            (*levels_visited)++;
+        }
+
         uint16_t index = address_level_index(
             virtual_address,
             level
@@ -470,6 +479,10 @@ const PageTableEntry *page_table_lookup(
         }
 
         current = current->entries[index];
+    }
+
+    if (levels_visited != NULL) {
+        (*levels_visited)++;
     }
 
     uint16_t leaf_index = address_level_index(
@@ -485,6 +498,18 @@ const PageTableEntry *page_table_lookup(
     }
 
     return entry;
+}
+
+const PageTableEntry *page_table_lookup(
+    const PageTable *table,
+    uint64_t virtual_address
+)
+{
+    return page_table_lookup_with_levels(
+        table,
+        virtual_address,
+        NULL
+    );
 }
 
 static bool page_table_mapping_exists(

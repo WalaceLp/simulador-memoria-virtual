@@ -30,6 +30,12 @@ typedef struct {
     uint64_t page_faults;
     uint64_t replacements;
     uint64_t dirty_evictions;
+
+    uint64_t tlb_hits;
+    uint64_t tlb_misses;
+
+    uint64_t page_walks;
+    uint64_t page_walk_levels;
 } VirtualMemoryStats;
 
 typedef struct VirtualMemory VirtualMemory;
@@ -41,6 +47,12 @@ VirtualMemory *virtual_memory_create(
 VirtualMemory *virtual_memory_create_with_policy(
     size_t frame_count,
     ReplacementPolicyType policy_type
+);
+
+VirtualMemory *virtual_memory_create_with_policy_and_tlb(
+    size_t frame_count,
+    ReplacementPolicyType policy_type,
+    size_t tlb_entries
 );
 
 void virtual_memory_destroy(
@@ -63,6 +75,14 @@ const PhysicalMemory *virtual_memory_get_physical_memory(
 );
 
 const char *virtual_memory_policy_name(
+    const VirtualMemory *memory
+);
+
+double virtual_memory_tlb_hit_ratio(
+    const VirtualMemory *memory
+);
+
+double virtual_memory_average_page_walk_levels(
     const VirtualMemory *memory
 );
 

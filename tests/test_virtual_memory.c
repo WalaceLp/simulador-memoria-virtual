@@ -523,6 +523,256 @@ static void test_invalid_arguments(void)
     virtual_memory_destroy(memory);
 }
 
+static void test_tlb_hit_after_first_access(void)
+{
+    VirtualMemory *memory =
+        virtual_memory_create_with_policy_and_tlb(
+            4,
+            REPLACEMENT_FIFO,
+            2
+        );
+
+    Process *process =
+        process_create(1);
+
+    assert(memory != NULL);
+    assert(process != NULL);
+
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_OK
+    );
+
+    const VirtualMemoryStats *stats =
+        virtual_memory_get_stats(memory);
+
+    assert(stats != NULL);
+    assert(stats->tlb_hits == 1);
+    assert(stats->tlb_misses == 1);
+    assert(stats->page_walks == 1);
+    assert(stats->page_walk_levels == 1);
+
+    assert(
+        virtual_memory_tlb_hit_ratio(memory) == 0.5
+    );
+
+    process_destroy(process);
+    virtual_memory_destroy(memory);
+}
+
+static void test_tlb_distinguishes_processes(void)
+{
+    VirtualMemory *memory =
+        virtual_memory_create_with_policy_and_tlb(
+            2,
+            REPLACEMENT_FIFO,
+            4
+        );
+
+    Process *first =
+        process_create(1);
+
+    Process *second =
+        process_create(2);
+
+    assert(memory != NULL);
+    assert(first != NULL);
+    assert(second != NULL);
+
+    assert(
+        virtual_memory_access(
+            memory,
+            first,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    assert(
+        virtual_memory_access(
+            memory,
+            second,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    assert(
+        virtual_memory_access(
+            memory,
+            first,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_OK
+    );
+
+    assert(
+        virtual_memory_access(
+            memory,
+            second,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_OK
+    );
+
+    const VirtualMemoryStats *stats =
+        virtual_memory_get_stats(memory);
+
+    assert(stats != NULL);
+    assert(stats->tlb_hits == 2);
+    assert(stats->tlb_misses == 2);
+
+    process_destroy(first);
+    process_destroy(second);
+    virtual_memory_destroy(memory);
+}
+
+static void test_tlb_entry_is_invalidated_on_replacement(void)
+{
+    VirtualMemory *memory =
+        virtual_memory_create_with_policy_and_tlb(
+            1,
+            REPLACEMENT_FIFO,
+            4
+        );
+
+    Process *process =
+        process_create(1);
+
+    assert(memory != NULL);
+    assert(process != NULL);
+
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x2000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    /*
+     * A tradução de 0x1000 deve ter sido invalidada.
+     * Portanto, o novo acesso provoca outro page fault.
+     */
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    const VirtualMemoryStats *stats =
+        virtual_memory_get_stats(memory);
+
+    assert(stats != NULL);
+    assert(stats->page_faults == 3);
+    assert(stats->replacements == 2);
+    assert(stats->tlb_hits == 0);
+    assert(stats->tlb_misses == 3);
+
+    process_destroy(process);
+    virtual_memory_destroy(memory);
+}
+
+static void test_page_walk_reaches_four_levels(void)
+{
+    VirtualMemory *memory =
+        virtual_memory_create_with_policy_and_tlb(
+            2,
+            REPLACEMENT_FIFO,
+            1
+        );
+
+    Process *process =
+        process_create(1);
+
+    assert(memory != NULL);
+    assert(process != NULL);
+
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    /*
+     * A TLB possui apenas uma entrada. O acesso a outra
+     * página substitui a tradução anterior.
+     */
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x2000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_PAGE_FAULT
+    );
+
+    /*
+     * A página 0x1000 ainda está na RAM, mas não na TLB.
+     * O simulador precisa percorrer os quatro níveis.
+     */
+    assert(
+        virtual_memory_access(
+            memory,
+            process,
+            0x1000ULL,
+            VM_ACCESS_READ
+        ) == VM_ACCESS_OK
+    );
+
+    const VirtualMemoryStats *stats =
+        virtual_memory_get_stats(memory);
+
+    assert(stats != NULL);
+    assert(stats->page_walks == 3);
+
+    /*
+     * Primeiro page fault: 1 nível.
+     * Segundo page fault: 4 níveis, pois compartilha os
+     * três nós intermediários com a primeira página.
+     * Terceiro acesso: 4 níveis.
+     */
+    assert(stats->page_walk_levels >= 9);
+
+    assert(
+        virtual_memory_average_page_walk_levels(
+            memory
+        ) >= 3.0
+    );
+
+    process_destroy(process);
+    virtual_memory_destroy(memory);
+}
+
 int main(void)
 {
     test_create_with_policy();
@@ -535,6 +785,11 @@ int main(void)
     test_replacement_between_processes();
     test_same_page_different_offsets();
     test_invalid_arguments();
+
+    test_tlb_hit_after_first_access();
+    test_tlb_distinguishes_processes();
+    test_tlb_entry_is_invalidated_on_replacement();
+    test_page_walk_reaches_four_levels();
 
     printf(
         "Todos os testes de virtual_memory passaram.\n"

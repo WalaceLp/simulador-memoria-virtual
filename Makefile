@@ -17,6 +17,7 @@ COMMON_SOURCES = \
 	$(CORE_SOURCES) \
 	src/physical_memory.c \
 	src/virtual_memory.c \
+	src/tlb.c \
 	$(REPLACEMENT_SOURCES)
 
 .PHONY: all test stress clean valgrind
@@ -37,12 +38,14 @@ test: \
 	bin/test_process \
 	bin/test_physical_memory \
 	bin/test_replacement \
+	bin/test_tlb \
 	bin/test_virtual_memory
 	./bin/test_address
 	./bin/test_page_table
 	./bin/test_process
 	./bin/test_physical_memory
 	./bin/test_replacement
+	./bin/test_tlb
 	./bin/test_virtual_memory
 
 bin/test_address: tests/test_address.c src/address.c
@@ -93,6 +96,15 @@ bin/test_replacement: \
 		$(REPLACEMENT_SOURCES) \
 		-o bin/test_replacement
 
+bin/test_tlb: \
+	tests/test_tlb.c \
+	src/tlb.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) \
+		tests/test_tlb.c \
+		src/tlb.c \
+		-o bin/test_tlb
+
 bin/test_virtual_memory: \
 	tests/test_virtual_memory.c \
 	$(COMMON_SOURCES)
@@ -123,6 +135,10 @@ valgrind: test
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_replacement
+	valgrind --leak-check=full \
+		--show-leak-kinds=all \
+		--error-exitcode=1 \
+		./bin/test_tlb
 	valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--error-exitcode=1 \

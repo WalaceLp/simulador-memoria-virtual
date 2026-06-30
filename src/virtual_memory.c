@@ -6,11 +6,15 @@
 #include "physical_memory.h"
 #include "process.h"
 #include "replacement.h"
+#include "tlb.h"
 #include "virtual_memory.h"
+
+#define DEFAULT_TLB_ENTRIES 16
 
 struct VirtualMemory {
     PhysicalMemory *physical_memory;
     ReplacementPolicy *replacement_policy;
+    Tlb *tlb;
 
     VirtualMemoryStats stats;
 };
@@ -25,12 +29,13 @@ static bool virtual_memory_access_type_is_valid(
     );
 }
 
-VirtualMemory *virtual_memory_create_with_policy(
+VirtualMemory *virtual_memory_create_with_policy_and_tlb(
     size_t frame_count,
-    ReplacementPolicyType policy_type
+    ReplacementPolicyType policy_type,
+    size_t tlb_entries
 )
 {
-    if (frame_count == 0) {
+    if (frame_count == 0 || tlb_entries == 0) {
         return NULL;
     }
 
@@ -67,7 +72,35 @@ VirtualMemory *virtual_memory_create_with_policy(
         return NULL;
     }
 
+    memory->tlb = tlb_create(tlb_entries);
+
+    if (memory->tlb == NULL) {
+        replacement_policy_destroy(
+            memory->replacement_policy
+        );
+
+        physical_memory_destroy(
+            memory->physical_memory
+        );
+
+        free(memory);
+
+        return NULL;
+    }
+
     return memory;
+}
+
+VirtualMemory *virtual_memory_create_with_policy(
+    size_t frame_count,
+    ReplacementPolicyType policy_type
+)
+{
+    return virtual_memory_create_with_policy_and_tlb(
+        frame_count,
+        policy_type,
+        DEFAULT_TLB_ENTRIES
+    );
 }
 
 VirtualMemory *virtual_memory_create(
@@ -87,6 +120,8 @@ void virtual_memory_destroy(
     if (memory == NULL) {
         return;
     }
+
+    tlb_destroy(memory->tlb);
 
     replacement_policy_destroy(
         memory->replacement_policy
@@ -149,6 +184,7 @@ static int virtual_memory_load_free_frame(
     VirtualMemory *memory,
     Process *process,
     uint64_t virtual_address,
+    uint64_t virtual_page,
     uint32_t frame_number,
     bool is_write
 )
@@ -215,6 +251,32 @@ static int virtual_memory_load_free_frame(
         return -1;
     }
 
+    if (
+        tlb_insert(
+            memory->tlb,
+            process_get_pid(process),
+            virtual_page,
+            frame_number
+        ) != 0
+    ) {
+        replacement_policy_on_evict(
+            memory->replacement_policy,
+            frame_number
+        );
+
+        page_table_unmap(
+            page_table,
+            virtual_address
+        );
+
+        physical_memory_release_frame(
+            memory->physical_memory,
+            frame_number
+        );
+
+        return -1;
+    }
+
     replacement_policy_tick(
         memory->replacement_policy
     );
@@ -256,6 +318,8 @@ static int virtual_memory_replace_page(
     Process *old_process =
         victim->owner_process;
 
+    int old_pid = victim->owner_pid;
+
     uint64_t old_virtual_page =
         victim->virtual_page;
 
@@ -278,12 +342,6 @@ static int virtual_memory_replace_page(
     uint64_t old_virtual_address =
         old_virtual_page << PAGE_OFFSET_BITS;
 
-    /*
-     * Primeiro cria o novo mapeamento.
-     *
-     * Caso a alocação interna da Trie falhe, o
-     * mapeamento antigo ainda permanece intacto.
-     */
     if (
         page_table_map(
             new_page_table,
@@ -295,8 +353,15 @@ static int virtual_memory_replace_page(
     }
 
     /*
-     * Depois remove o mapeamento da página vítima.
+     * A entrada antiga da TLB deve ser removida antes
+     * que o quadro passe a representar outra página.
      */
+    tlb_invalidate(
+        memory->tlb,
+        old_pid,
+        old_virtual_page
+    );
+
     if (
         page_table_unmap(
             old_page_table,
@@ -350,6 +415,17 @@ static int virtual_memory_replace_page(
         return -1;
     }
 
+    if (
+        tlb_insert(
+            memory->tlb,
+            process_get_pid(new_process),
+            new_virtual_page,
+            victim_frame
+        ) != 0
+    ) {
+        return -1;
+    }
+
     memory->stats.replacements++;
 
     if (victim_was_dirty) {
@@ -390,23 +466,79 @@ VirtualMemoryAccessResult virtual_memory_access(
         access_type
     );
 
-    const PageTableEntry *entry =
-        page_table_lookup(
-            page_table,
-            virtual_address
-        );
+    int pid = process_get_pid(process);
+
+    uint64_t virtual_page =
+        address_page_number(virtual_address);
 
     bool is_write =
         access_type == VM_ACCESS_WRITE;
 
+    uint32_t frame_number =
+        INVALID_FRAME_NUMBER;
+
     /*
-     * Hit na tabela de páginas.
+     * Primeiro consulta a TLB.
      */
-    if (entry != NULL) {
+    if (
+        tlb_lookup(
+            memory->tlb,
+            pid,
+            virtual_page,
+            &frame_number
+        )
+    ) {
+        memory->stats.tlb_hits++;
+
         if (
             virtual_memory_notify_access(
                 memory,
-                entry->frame_number,
+                frame_number,
+                is_write
+            ) != 0
+        ) {
+            return VM_ACCESS_INTERNAL_ERROR;
+        }
+
+        return VM_ACCESS_OK;
+    }
+
+    memory->stats.tlb_misses++;
+    memory->stats.page_walks++;
+
+    size_t levels_visited = 0;
+
+    const PageTableEntry *entry =
+        page_table_lookup_with_levels(
+            page_table,
+            virtual_address,
+            &levels_visited
+        );
+
+    memory->stats.page_walk_levels +=
+        levels_visited;
+
+    /*
+     * TLB miss, mas a página estava na tabela.
+     */
+    if (entry != NULL) {
+        frame_number = entry->frame_number;
+
+        if (
+            tlb_insert(
+                memory->tlb,
+                pid,
+                virtual_page,
+                frame_number
+            ) != 0
+        ) {
+            return VM_ACCESS_INTERNAL_ERROR;
+        }
+
+        if (
+            virtual_memory_notify_access(
+                memory,
+                frame_number,
                 is_write
             ) != 0
         ) {
@@ -417,15 +549,9 @@ VirtualMemoryAccessResult virtual_memory_access(
     }
 
     /*
-     * A página não está presente.
+     * A página não está presente na tabela.
      */
     memory->stats.page_faults++;
-
-    uint64_t virtual_page =
-        address_page_number(virtual_address);
-
-    uint32_t frame_number =
-        INVALID_FRAME_NUMBER;
 
     int allocation_result =
         physical_memory_allocate_frame(
@@ -435,15 +561,13 @@ VirtualMemoryAccessResult virtual_memory_access(
             &frame_number
         );
 
-    /*
-     * Existe um quadro livre.
-     */
     if (allocation_result == 0) {
         if (
             virtual_memory_load_free_frame(
                 memory,
                 process,
                 virtual_address,
+                virtual_page,
                 frame_number,
                 is_write
             ) != 0
@@ -454,9 +578,6 @@ VirtualMemoryAccessResult virtual_memory_access(
         return VM_ACCESS_PAGE_FAULT;
     }
 
-    /*
-     * Memória cheia: escolher e substituir uma vítima.
-     */
     if (allocation_result == -2) {
         if (
             virtual_memory_replace_page(
@@ -509,4 +630,40 @@ const char *virtual_memory_policy_name(
     return replacement_policy_name(
         memory->replacement_policy
     );
+}
+
+double virtual_memory_tlb_hit_ratio(
+    const VirtualMemory *memory
+)
+{
+    if (memory == NULL) {
+        return 0.0;
+    }
+
+    uint64_t total =
+        memory->stats.tlb_hits +
+        memory->stats.tlb_misses;
+
+    if (total == 0) {
+        return 0.0;
+    }
+
+    return (double)memory->stats.tlb_hits /
+           (double)total;
+}
+
+double virtual_memory_average_page_walk_levels(
+    const VirtualMemory *memory
+)
+{
+    if (
+        memory == NULL ||
+        memory->stats.page_walks == 0
+    ) {
+        return 0.0;
+    }
+
+    return
+        (double)memory->stats.page_walk_levels /
+        (double)memory->stats.page_walks;
 }
