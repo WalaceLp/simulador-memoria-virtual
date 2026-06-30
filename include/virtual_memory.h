@@ -95,6 +95,18 @@ int virtual_memory_write_byte(
     uint8_t value
 );
 
+int virtual_memory_fork_process(
+    VirtualMemory *memory,
+    Process *parent,
+    int child_pid,
+    Process **child
+);
+
+int virtual_memory_release_process(
+    VirtualMemory *memory,
+    Process *process
+);
+
 const VirtualMemoryStats *virtual_memory_get_stats(
     const VirtualMemory *memory
 );
@@ -121,11 +133,6 @@ double virtual_memory_average_page_walk_levels(
 
 bool virtual_memory_validate(
     const VirtualMemory *memory
-);
-
-int virtual_memory_release_process(
-    VirtualMemory *memory,
-    Process *process
 );
 
 #endif

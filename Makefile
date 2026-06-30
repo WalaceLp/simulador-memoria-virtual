@@ -1,5 +1,12 @@
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -Werror -Iinclude -g
+
+CFLAGS = \
+	-std=c11 \
+	-Wall \
+	-Wextra \
+	-Werror \
+	-Iinclude \
+	-g
 
 REPLACEMENT_SOURCES = \
 	src/replacement/replacement.c \
@@ -17,14 +24,22 @@ MEMORY_SOURCES = \
 	src/physical_memory.c \
 	src/virtual_memory.c \
 	src/tlb.c \
-	src/swap.c
+	src/swap.c \
+	src/cow.c
 
 COMMON_SOURCES = \
 	$(CORE_SOURCES) \
 	$(MEMORY_SOURCES) \
 	$(REPLACEMENT_SOURCES)
 
-.PHONY: all test stress clean valgrind belady validate
+.PHONY: \
+	all \
+	test \
+	stress \
+	clean \
+	valgrind \
+	belady \
+	validate
 
 all: bin/vmsim bin/tracegen
 
@@ -69,7 +84,9 @@ test: \
 	bin/test_cli \
 	bin/test_csv_export \
 	bin/test_trace_generator \
-	bin/test_stress
+	bin/test_stress \
+	bin/test_process_lifecycle \
+	bin/test_cow_integration
 	./bin/test_address
 	./bin/test_page_table
 	./bin/test_process
@@ -84,6 +101,8 @@ test: \
 	./bin/test_csv_export
 	./bin/test_trace_generator
 	./bin/test_stress
+	./bin/test_process_lifecycle
+	./bin/test_cow_integration
 
 bin/test_address: \
 	tests/test_address.c \
@@ -231,6 +250,26 @@ bin/test_stress: \
 		$(COMMON_SOURCES) \
 		-o bin/test_stress
 
+bin/test_process_lifecycle: \
+	tests/test_process_lifecycle.c \
+	$(COMMON_SOURCES)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) \
+		-Isrc/replacement \
+		tests/test_process_lifecycle.c \
+		$(COMMON_SOURCES) \
+		-o bin/test_process_lifecycle
+
+bin/test_cow_integration: \
+	tests/test_cow_integration.c \
+	$(COMMON_SOURCES)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) \
+		-Isrc/replacement \
+		tests/test_cow_integration.c \
+		$(COMMON_SOURCES) \
+		-o bin/test_cow_integration
+
 belady: all
 	./scripts/run_belady.sh
 
@@ -238,80 +277,114 @@ stress: all bin/test_stress
 	./bin/test_stress
 	./scripts/run_stress.sh
 
+validate:
+	./scripts/run_final_validation.sh
+
 valgrind: test
-	valgrind --leak-check=full \
-		--show-leak-kinds=all \
-		--track-origins=yes \
-		--error-exitcode=1 \
-		./bin/test_address
-	valgrind --leak-check=full \
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_page_table
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_process
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_physical_memory
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_replacement
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_tlb
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_swap
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_virtual_memory
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_trace
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_swap_integration
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_cli
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_csv_export
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_trace_generator
-	valgrind --leak-check=full \
+
+	valgrind \
+		--leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
 		--error-exitcode=1 \
 		./bin/test_stress
 
-validate:
-	./scripts/run_final_validation.sh
+	valgrind \
+		--leak-check=full \
+		--show-leak-kinds=all \
+		--track-origins=yes \
+		--error-exitcode=1 \
+		./bin/test_process_lifecycle
+
+	valgrind \
+		--leak-check=full \
+		--show-leak-kinds=all \
+		--track-origins=yes \
+		--error-exitcode=1 \
+		./bin/test_cow_integration
 
 clean:
 	rm -rf bin build

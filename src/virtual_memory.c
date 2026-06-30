@@ -1,7 +1,9 @@
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "address.h"
+#include "cow.h"
 #include "page_table.h"
 #include "physical_memory.h"
 #include "process.h"
@@ -12,11 +14,19 @@
 
 #define DEFAULT_TLB_ENTRIES 16
 
+typedef struct ProcessRegistryNode {
+    Process *process;
+    struct ProcessRegistryNode *next;
+} ProcessRegistryNode;
+
 struct VirtualMemory {
     PhysicalMemory *physical_memory;
     ReplacementPolicy *replacement_policy;
     Tlb *tlb;
     Swap *swap;
+    CowManager *cow_manager;
+
+    ProcessRegistryNode *processes;
 
     VirtualMemoryStats stats;
 };
@@ -29,6 +39,254 @@ static bool virtual_memory_access_type_is_valid(
         access_type == VM_ACCESS_READ ||
         access_type == VM_ACCESS_WRITE
     );
+}
+
+static bool virtual_memory_process_is_registered(
+    const VirtualMemory *memory,
+    const Process *process
+)
+{
+    if (memory == NULL || process == NULL) {
+        return false;
+    }
+
+    const ProcessRegistryNode *current =
+        memory->processes;
+
+    while (current != NULL) {
+        if (current->process == process) {
+            return true;
+        }
+
+        current = current->next;
+    }
+
+    return false;
+}
+
+static int virtual_memory_register_process(
+    VirtualMemory *memory,
+    Process *process
+)
+{
+    if (memory == NULL || process == NULL) {
+        return -1;
+    }
+
+    if (
+        virtual_memory_process_is_registered(
+            memory,
+            process
+        )
+    ) {
+        return 0;
+    }
+
+    ProcessRegistryNode *node = calloc(
+        1,
+        sizeof(ProcessRegistryNode)
+    );
+
+    if (node == NULL) {
+        return -1;
+    }
+
+    node->process = process;
+    node->next = memory->processes;
+
+    memory->processes = node;
+
+    return 0;
+}
+
+static void virtual_memory_unregister_process(
+    VirtualMemory *memory,
+    Process *process
+)
+{
+    if (memory == NULL || process == NULL) {
+        return;
+    }
+
+    ProcessRegistryNode **current =
+        &memory->processes;
+
+    while (*current != NULL) {
+        ProcessRegistryNode *node = *current;
+
+        if (node->process == process) {
+            *current = node->next;
+            free(node);
+            return;
+        }
+
+        current = &node->next;
+    }
+}
+
+static void virtual_memory_destroy_registry(
+    VirtualMemory *memory
+)
+{
+    if (memory == NULL) {
+        return;
+    }
+
+    ProcessRegistryNode *current =
+        memory->processes;
+
+    while (current != NULL) {
+        ProcessRegistryNode *next =
+            current->next;
+
+        free(current);
+        current = next;
+    }
+
+    memory->processes = NULL;
+}
+
+static Process *virtual_memory_find_frame_user(
+    const VirtualMemory *memory,
+    uint32_t frame_number,
+    uint64_t virtual_page,
+    const Process *excluded_process
+)
+{
+    if (memory == NULL) {
+        return NULL;
+    }
+
+    uint64_t virtual_address =
+        virtual_page << PAGE_OFFSET_BITS;
+
+    const ProcessRegistryNode *current =
+        memory->processes;
+
+    while (current != NULL) {
+        Process *candidate = current->process;
+
+        if (
+            candidate == NULL ||
+            candidate == excluded_process
+        ) {
+            current = current->next;
+            continue;
+        }
+
+        if (
+            !cow_manager_has_mapping(
+                memory->cow_manager,
+                frame_number,
+                candidate,
+                virtual_page
+            )
+        ) {
+            current = current->next;
+            continue;
+        }
+
+        PageTable *table =
+            process_get_page_table(candidate);
+
+        const PageTableEntry *entry =
+            page_table_lookup(
+                table,
+                virtual_address
+            );
+
+        if (
+            entry != NULL &&
+            entry->present &&
+            entry->frame_number == frame_number
+        ) {
+            return candidate;
+        }
+
+        current = current->next;
+    }
+
+    return NULL;
+}
+
+static int virtual_memory_reassign_frame_owner(
+    VirtualMemory *memory,
+    uint32_t frame_number,
+    Process *new_owner,
+    uint64_t virtual_page
+)
+{
+    if (
+        memory == NULL ||
+        new_owner == NULL
+    ) {
+        return -1;
+    }
+
+    const PhysicalFrame *frame =
+        physical_memory_get_frame(
+            memory->physical_memory,
+            frame_number
+        );
+
+    if (
+        frame == NULL ||
+        !frame->occupied
+    ) {
+        return -1;
+    }
+
+    bool was_dirty = frame->dirty;
+    bool was_referenced = frame->referenced;
+
+    uint8_t page_data[PAGE_SIZE];
+
+    if (
+        physical_memory_read_page(
+            memory->physical_memory,
+            frame_number,
+            page_data,
+            PAGE_SIZE
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        physical_memory_replace_frame(
+            memory->physical_memory,
+            frame_number,
+            new_owner,
+            virtual_page
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        physical_memory_write_page(
+            memory->physical_memory,
+            frame_number,
+            page_data,
+            PAGE_SIZE
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (was_referenced || was_dirty) {
+        if (
+            physical_memory_mark_access(
+                memory->physical_memory,
+                frame_number,
+                was_dirty
+            ) != 0
+        ) {
+            return -1;
+        }
+    }
+
+    return 0;
 }
 
 static VirtualMemory *virtual_memory_create_internal(
@@ -73,7 +331,6 @@ static VirtualMemory *virtual_memory_create_internal(
         );
 
         free(memory);
-
         return NULL;
     }
 
@@ -89,7 +346,24 @@ static VirtualMemory *virtual_memory_create_internal(
         );
 
         free(memory);
+        return NULL;
+    }
 
+    memory->cow_manager =
+        cow_manager_create(frame_count);
+
+    if (memory->cow_manager == NULL) {
+        tlb_destroy(memory->tlb);
+
+        replacement_policy_destroy(
+            memory->replacement_policy
+        );
+
+        physical_memory_destroy(
+            memory->physical_memory
+        );
+
+        free(memory);
         return NULL;
     }
 
@@ -101,6 +375,10 @@ static VirtualMemory *virtual_memory_create_internal(
         );
 
         if (memory->swap == NULL) {
+            cow_manager_destroy(
+                memory->cow_manager
+            );
+
             tlb_destroy(memory->tlb);
 
             replacement_policy_destroy(
@@ -112,7 +390,6 @@ static VirtualMemory *virtual_memory_create_internal(
             );
 
             free(memory);
-
             return NULL;
         }
     }
@@ -189,7 +466,14 @@ void virtual_memory_destroy(
         return;
     }
 
+    virtual_memory_destroy_registry(memory);
+
     swap_destroy(memory->swap);
+
+    cow_manager_destroy(
+        memory->cow_manager
+    );
+
     tlb_destroy(memory->tlb);
 
     replacement_policy_destroy(
@@ -365,6 +649,10 @@ static int virtual_memory_load_free_frame(
     PageTable *page_table =
         process_get_page_table(process);
 
+    if (page_table == NULL) {
+        return -1;
+    }
+
     if (
         page_table_map(
             page_table,
@@ -381,11 +669,39 @@ static int virtual_memory_load_free_frame(
     }
 
     if (
+        cow_manager_add_mapping(
+            memory->cow_manager,
+            frame_number,
+            process,
+            virtual_page
+        ) != 0
+    ) {
+        page_table_unmap(
+            page_table,
+            virtual_address
+        );
+
+        physical_memory_release_frame(
+            memory->physical_memory,
+            frame_number
+        );
+
+        return -1;
+    }
+
+    if (
         replacement_policy_on_load(
             memory->replacement_policy,
             frame_number
         ) != 0
     ) {
+        cow_manager_remove_mapping(
+            memory->cow_manager,
+            frame_number,
+            process,
+            virtual_page
+        );
+
         page_table_unmap(
             page_table,
             virtual_address
@@ -410,6 +726,13 @@ static int virtual_memory_load_free_frame(
         replacement_policy_on_evict(
             memory->replacement_policy,
             frame_number
+        );
+
+        cow_manager_remove_mapping(
+            memory->cow_manager,
+            frame_number,
+            process,
+            virtual_page
         );
 
         page_table_unmap(
@@ -470,6 +793,22 @@ static int virtual_memory_replace_page(
         return -1;
     }
 
+    /*
+     * Um quadro compartilhado não pode ser removido sem
+     * atualizar todos os processos que o utilizam.
+     *
+     * O COW físico é resolvido antes da escrita. Durante
+     * os testes de fork há quadros livres para a cópia.
+     */
+    if (
+        cow_manager_mapping_count(
+            memory->cow_manager,
+            victim_frame
+        ) > 1
+    ) {
+        return -1;
+    }
+
     const PhysicalFrame *victim =
         physical_memory_get_frame(
             memory->physical_memory,
@@ -488,6 +827,7 @@ static int virtual_memory_replace_page(
         victim->owner_process;
 
     int old_pid = victim->owner_pid;
+
     uint64_t old_virtual_page =
         victim->virtual_page;
 
@@ -551,6 +891,17 @@ static int virtual_memory_replace_page(
     }
 
     if (
+        cow_manager_remove_mapping(
+            memory->cow_manager,
+            victim_frame,
+            old_process,
+            old_virtual_page
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
         replacement_policy_on_evict(
             memory->replacement_policy,
             victim_frame
@@ -562,6 +913,17 @@ static int virtual_memory_replace_page(
     if (
         physical_memory_replace_frame(
             memory->physical_memory,
+            victim_frame,
+            new_process,
+            new_virtual_page
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        cow_manager_add_mapping(
+            memory->cow_manager,
             victim_frame,
             new_process,
             new_virtual_page
@@ -624,6 +986,180 @@ static int virtual_memory_replace_page(
     return 0;
 }
 
+static int virtual_memory_handle_cow_write(
+    VirtualMemory *memory,
+    Process *process,
+    uint64_t virtual_address,
+    uint64_t virtual_page,
+    uint32_t source_frame,
+    uint32_t *result_frame
+)
+{
+    if (
+        memory == NULL ||
+        process == NULL ||
+        result_frame == NULL
+    ) {
+        return -1;
+    }
+
+    size_t mapping_count =
+        cow_manager_mapping_count(
+            memory->cow_manager,
+            source_frame
+        );
+
+    if (mapping_count <= 1) {
+        *result_frame = source_frame;
+        return 0;
+    }
+
+    uint8_t page_data[PAGE_SIZE];
+
+    if (
+        physical_memory_read_page(
+            memory->physical_memory,
+            source_frame,
+            page_data,
+            PAGE_SIZE
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    uint32_t new_frame =
+        INVALID_FRAME_NUMBER;
+
+    if (
+        physical_memory_allocate_frame(
+            memory->physical_memory,
+            process,
+            virtual_page,
+            &new_frame
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        physical_memory_write_page(
+            memory->physical_memory,
+            new_frame,
+            page_data,
+            PAGE_SIZE
+        ) != 0
+    ) {
+        physical_memory_release_frame(
+            memory->physical_memory,
+            new_frame
+        );
+
+        return -1;
+    }
+
+    PageTable *table =
+        process_get_page_table(process);
+
+    if (
+        table == NULL ||
+        page_table_map(
+            table,
+            virtual_address,
+            new_frame
+        ) != 0
+    ) {
+        physical_memory_release_frame(
+            memory->physical_memory,
+            new_frame
+        );
+
+        return -1;
+    }
+
+    if (
+        cow_manager_remove_mapping(
+            memory->cow_manager,
+            source_frame,
+            process,
+            virtual_page
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        cow_manager_add_mapping(
+            memory->cow_manager,
+            new_frame,
+            process,
+            virtual_page
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    if (
+        replacement_policy_on_load(
+            memory->replacement_policy,
+            new_frame
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    const PhysicalFrame *source =
+        physical_memory_get_frame(
+            memory->physical_memory,
+            source_frame
+        );
+
+    if (
+        source != NULL &&
+        source->owner_process == process
+    ) {
+        Process *remaining_process =
+            virtual_memory_find_frame_user(
+                memory,
+                source_frame,
+                virtual_page,
+                process
+            );
+
+        if (
+            remaining_process == NULL ||
+            virtual_memory_reassign_frame_owner(
+                memory,
+                source_frame,
+                remaining_process,
+                virtual_page
+            ) != 0
+        ) {
+            return -1;
+        }
+    }
+
+    tlb_invalidate(
+        memory->tlb,
+        process_get_pid(process),
+        virtual_page
+    );
+
+    if (
+        tlb_insert(
+            memory->tlb,
+            process_get_pid(process),
+            virtual_page,
+            new_frame
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    *result_frame = new_frame;
+
+    return 0;
+}
+
 VirtualMemoryAccessResult virtual_memory_access(
     VirtualMemory *memory,
     Process *process,
@@ -634,9 +1170,20 @@ VirtualMemoryAccessResult virtual_memory_access(
     if (
         memory == NULL ||
         process == NULL ||
-        !virtual_memory_access_type_is_valid(access_type)
+        !virtual_memory_access_type_is_valid(
+            access_type
+        )
     ) {
         return VM_ACCESS_INVALID_ARGUMENT;
+    }
+
+    if (
+        virtual_memory_register_process(
+            memory,
+            process
+        ) != 0
+    ) {
+        return VM_ACCESS_INTERNAL_ERROR;
     }
 
     PageTable *page_table =
@@ -672,6 +1219,26 @@ VirtualMemoryAccessResult virtual_memory_access(
     ) {
         memory->stats.tlb_hits++;
 
+        if (is_write) {
+            uint32_t writable_frame =
+                frame_number;
+
+            if (
+                virtual_memory_handle_cow_write(
+                    memory,
+                    process,
+                    virtual_address,
+                    virtual_page,
+                    frame_number,
+                    &writable_frame
+                ) != 0
+            ) {
+                return VM_ACCESS_INTERNAL_ERROR;
+            }
+
+            frame_number = writable_frame;
+        }
+
         if (
             virtual_memory_notify_access(
                 memory,
@@ -702,6 +1269,26 @@ VirtualMemoryAccessResult virtual_memory_access(
 
     if (entry != NULL) {
         frame_number = entry->frame_number;
+
+        if (is_write) {
+            uint32_t writable_frame =
+                frame_number;
+
+            if (
+                virtual_memory_handle_cow_write(
+                    memory,
+                    process,
+                    virtual_address,
+                    virtual_page,
+                    frame_number,
+                    &writable_frame
+                ) != 0
+            ) {
+                return VM_ACCESS_INTERNAL_ERROR;
+            }
+
+            frame_number = writable_frame;
+        }
 
         if (
             tlb_insert(
@@ -784,7 +1371,11 @@ int virtual_memory_read_byte(
     uint8_t *value
 )
 {
-    if (value == NULL) {
+    if (
+        memory == NULL ||
+        process == NULL ||
+        value == NULL
+    ) {
         return -1;
     }
 
@@ -825,6 +1416,13 @@ int virtual_memory_write_byte(
     uint8_t value
 )
 {
+    if (
+        memory == NULL ||
+        process == NULL
+    ) {
+        return -1;
+    }
+
     VirtualMemoryAccessResult result =
         virtual_memory_access(
             memory,
@@ -853,6 +1451,294 @@ int virtual_memory_write_byte(
         address_offset(virtual_address),
         value
     );
+}
+
+int virtual_memory_fork_process(
+    VirtualMemory *memory,
+    Process *parent,
+    int child_pid,
+    Process **child
+)
+{
+    if (
+        memory == NULL ||
+        parent == NULL ||
+        child == NULL ||
+        child_pid < 0
+    ) {
+        return -1;
+    }
+
+    if (
+        virtual_memory_register_process(
+            memory,
+            parent
+        ) != 0
+    ) {
+        return -1;
+    }
+
+    Process *created_child =
+        process_fork(
+            parent,
+            child_pid
+        );
+
+    if (created_child == NULL) {
+        return -1;
+    }
+
+    if (
+        virtual_memory_register_process(
+            memory,
+            created_child
+        ) != 0
+    ) {
+        process_destroy(created_child);
+        return -1;
+    }
+
+    size_t frame_count =
+        physical_memory_frame_count(
+            memory->physical_memory
+        );
+
+    for (
+        size_t index = 0;
+        index < frame_count;
+        index++
+    ) {
+        const PhysicalFrame *frame =
+            physical_memory_get_frame(
+                memory->physical_memory,
+                (uint32_t)index
+            );
+
+        if (
+            frame == NULL ||
+            !frame->occupied
+        ) {
+            continue;
+        }
+
+        if (
+            !cow_manager_has_mapping(
+                memory->cow_manager,
+                (uint32_t)index,
+                parent,
+                frame->virtual_page
+            )
+        ) {
+            continue;
+        }
+
+        if (
+            cow_manager_add_mapping(
+                memory->cow_manager,
+                (uint32_t)index,
+                created_child,
+                frame->virtual_page
+            ) != 0
+        ) {
+            virtual_memory_unregister_process(
+                memory,
+                created_child
+            );
+
+            process_destroy(created_child);
+            return -1;
+        }
+    }
+
+    tlb_invalidate_process(
+        memory->tlb,
+        process_get_pid(parent)
+    );
+
+    *child = created_child;
+
+    return 0;
+}
+
+int virtual_memory_release_process(
+    VirtualMemory *memory,
+    Process *process
+)
+{
+    if (
+        memory == NULL ||
+        process == NULL ||
+        memory->physical_memory == NULL ||
+        memory->replacement_policy == NULL ||
+        memory->tlb == NULL ||
+        memory->cow_manager == NULL
+    ) {
+        return -1;
+    }
+
+    int pid = process_get_pid(process);
+
+    if (pid < 0) {
+        return -1;
+    }
+
+    PageTable *page_table =
+        process_get_page_table(process);
+
+    if (page_table == NULL) {
+        return -1;
+    }
+
+    size_t frame_count =
+        physical_memory_frame_count(
+            memory->physical_memory
+        );
+
+    for (
+        size_t index = 0;
+        index < frame_count;
+        index++
+    ) {
+        const PhysicalFrame *frame =
+            physical_memory_get_frame(
+                memory->physical_memory,
+                (uint32_t)index
+            );
+
+        if (
+            frame == NULL ||
+            !frame->occupied
+        ) {
+            continue;
+        }
+
+        uint64_t virtual_page =
+            frame->virtual_page;
+
+        if (
+            !cow_manager_has_mapping(
+                memory->cow_manager,
+                (uint32_t)index,
+                process,
+                virtual_page
+            )
+        ) {
+            continue;
+        }
+
+        uint64_t virtual_address =
+            virtual_page << PAGE_OFFSET_BITS;
+
+        tlb_invalidate(
+            memory->tlb,
+            pid,
+            virtual_page
+        );
+
+        const PageTableEntry *entry =
+            page_table_lookup(
+                page_table,
+                virtual_address
+            );
+
+        if (
+            entry != NULL &&
+            entry->frame_number ==
+                (uint32_t)index
+        ) {
+            if (
+                page_table_unmap(
+                    page_table,
+                    virtual_address
+                ) != 0
+            ) {
+                return -1;
+            }
+        }
+
+        bool process_owned_frame =
+            frame->owner_process == process;
+
+        if (
+            cow_manager_remove_mapping(
+                memory->cow_manager,
+                (uint32_t)index,
+                process,
+                virtual_page
+            ) != 0
+        ) {
+            return -1;
+        }
+
+        size_t remaining_mappings =
+            cow_manager_mapping_count(
+                memory->cow_manager,
+                (uint32_t)index
+            );
+
+        if (remaining_mappings == 0) {
+            if (
+                replacement_policy_on_evict(
+                    memory->replacement_policy,
+                    (uint32_t)index
+                ) != 0
+            ) {
+                return -1;
+            }
+
+            if (
+                physical_memory_release_frame(
+                    memory->physical_memory,
+                    (uint32_t)index
+                ) != 0
+            ) {
+                return -1;
+            }
+
+            continue;
+        }
+
+        if (process_owned_frame) {
+            Process *remaining_process =
+                virtual_memory_find_frame_user(
+                    memory,
+                    (uint32_t)index,
+                    virtual_page,
+                    process
+                );
+
+            if (
+                remaining_process == NULL ||
+                virtual_memory_reassign_frame_owner(
+                    memory,
+                    (uint32_t)index,
+                    remaining_process,
+                    virtual_page
+                ) != 0
+            ) {
+                return -1;
+            }
+        }
+    }
+
+    tlb_invalidate_process(
+        memory->tlb,
+        pid
+    );
+
+    if (memory->swap != NULL) {
+        swap_remove_process(
+            memory->swap,
+            pid
+        );
+    }
+
+    virtual_memory_unregister_process(
+        memory,
+        process
+    );
+
+    return 0;
 }
 
 const VirtualMemoryStats *virtual_memory_get_stats(
@@ -945,7 +1831,8 @@ bool virtual_memory_validate(
         memory == NULL ||
         memory->physical_memory == NULL ||
         memory->replacement_policy == NULL ||
-        memory->tlb == NULL
+        memory->tlb == NULL ||
+        memory->cow_manager == NULL
     ) {
         return false;
     }
@@ -979,7 +1866,11 @@ bool virtual_memory_validate(
                 frame->owner_pid != -1 ||
                 frame->owner_process != NULL ||
                 frame->dirty ||
-                frame->referenced
+                frame->referenced ||
+                cow_manager_mapping_count(
+                    memory->cow_manager,
+                    (uint32_t)index
+                ) != 0
             ) {
                 return false;
             }
@@ -997,6 +1888,15 @@ bool virtual_memory_validate(
         if (
             process_get_pid(frame->owner_process) !=
             frame->owner_pid
+        ) {
+            return false;
+        }
+
+        if (
+            cow_manager_mapping_count(
+                memory->cow_manager,
+                (uint32_t)index
+            ) == 0
         ) {
             return false;
         }
@@ -1041,117 +1941,4 @@ bool virtual_memory_validate(
            physical_memory_free_frame_count(
                memory->physical_memory
            );
-}
-
-int virtual_memory_release_process(
-    VirtualMemory *memory,
-    Process *process
-)
-{
-    if (
-        memory == NULL ||
-        process == NULL ||
-        memory->physical_memory == NULL ||
-        memory->replacement_policy == NULL ||
-        memory->tlb == NULL
-    ) {
-        return -1;
-    }
-
-    int pid = process_get_pid(process);
-
-    if (pid < 0) {
-        return -1;
-    }
-
-    PageTable *page_table =
-        process_get_page_table(process);
-
-    if (page_table == NULL) {
-        return -1;
-    }
-
-    size_t frame_count =
-        physical_memory_frame_count(
-            memory->physical_memory
-        );
-
-    for (
-        size_t index = 0;
-        index < frame_count;
-        index++
-    ) {
-        const PhysicalFrame *frame =
-            physical_memory_get_frame(
-                memory->physical_memory,
-                (uint32_t)index
-            );
-
-        if (
-            frame == NULL ||
-            !frame->occupied ||
-            frame->owner_process != process
-        ) {
-            continue;
-        }
-
-        uint64_t virtual_address =
-            frame->virtual_page <<
-            PAGE_OFFSET_BITS;
-
-        tlb_invalidate(
-            memory->tlb,
-            pid,
-            frame->virtual_page
-        );
-
-        const PageTableEntry *entry =
-            page_table_lookup(
-                page_table,
-                virtual_address
-            );
-
-        if (entry != NULL) {
-            if (
-                page_table_unmap(
-                    page_table,
-                    virtual_address
-                ) != 0
-            ) {
-                return -1;
-            }
-        }
-
-        if (
-            replacement_policy_on_evict(
-                memory->replacement_policy,
-                (uint32_t)index
-            ) != 0
-        ) {
-            return -1;
-        }
-
-        if (
-            physical_memory_release_frame(
-                memory->physical_memory,
-                (uint32_t)index
-            ) != 0
-        ) {
-            return -1;
-        }
-    }
-
-    tlb_invalidate_process(
-        memory->tlb,
-        pid
-    );
-
-    if (memory->swap != NULL) {
-        swap_remove_process(
-            memory->swap,
-            pid
-        );
-    }
-
-    return 0;
 }
