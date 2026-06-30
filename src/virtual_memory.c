@@ -1042,3 +1042,116 @@ bool virtual_memory_validate(
                memory->physical_memory
            );
 }
+
+int virtual_memory_release_process(
+    VirtualMemory *memory,
+    Process *process
+)
+{
+    if (
+        memory == NULL ||
+        process == NULL ||
+        memory->physical_memory == NULL ||
+        memory->replacement_policy == NULL ||
+        memory->tlb == NULL
+    ) {
+        return -1;
+    }
+
+    int pid = process_get_pid(process);
+
+    if (pid < 0) {
+        return -1;
+    }
+
+    PageTable *page_table =
+        process_get_page_table(process);
+
+    if (page_table == NULL) {
+        return -1;
+    }
+
+    size_t frame_count =
+        physical_memory_frame_count(
+            memory->physical_memory
+        );
+
+    for (
+        size_t index = 0;
+        index < frame_count;
+        index++
+    ) {
+        const PhysicalFrame *frame =
+            physical_memory_get_frame(
+                memory->physical_memory,
+                (uint32_t)index
+            );
+
+        if (
+            frame == NULL ||
+            !frame->occupied ||
+            frame->owner_process != process
+        ) {
+            continue;
+        }
+
+        uint64_t virtual_address =
+            frame->virtual_page <<
+            PAGE_OFFSET_BITS;
+
+        tlb_invalidate(
+            memory->tlb,
+            pid,
+            frame->virtual_page
+        );
+
+        const PageTableEntry *entry =
+            page_table_lookup(
+                page_table,
+                virtual_address
+            );
+
+        if (entry != NULL) {
+            if (
+                page_table_unmap(
+                    page_table,
+                    virtual_address
+                ) != 0
+            ) {
+                return -1;
+            }
+        }
+
+        if (
+            replacement_policy_on_evict(
+                memory->replacement_policy,
+                (uint32_t)index
+            ) != 0
+        ) {
+            return -1;
+        }
+
+        if (
+            physical_memory_release_frame(
+                memory->physical_memory,
+                (uint32_t)index
+            ) != 0
+        ) {
+            return -1;
+        }
+    }
+
+    tlb_invalidate_process(
+        memory->tlb,
+        pid
+    );
+
+    if (memory->swap != NULL) {
+        swap_remove_process(
+            memory->swap,
+            pid
+        );
+    }
+
+    return 0;
+}

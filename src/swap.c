@@ -424,3 +424,37 @@ uint64_t swap_write_count(const Swap *swap)
 
     return swap->writes;
 }
+
+size_t swap_remove_process(
+    Swap *swap,
+    int pid
+)
+{
+    if (swap == NULL || pid < 0) {
+        return 0;
+    }
+
+    size_t removed = 0;
+
+    for (
+        size_t index = 0;
+        index < swap->slot_count;
+        index++
+    ) {
+        SwapSlot *slot = &swap->slots[index];
+
+        if (!slot->used || slot->pid != pid) {
+            continue;
+        }
+
+        slot->used = false;
+        slot->pid = -1;
+        slot->virtual_page = 0;
+
+        removed++;
+    }
+
+    swap->used_slot_count -= removed;
+
+    return removed;
+}

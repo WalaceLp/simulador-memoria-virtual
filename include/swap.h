@@ -49,4 +49,9 @@ uint64_t swap_read_count(const Swap *swap);
 
 uint64_t swap_write_count(const Swap *swap);
 
+size_t swap_remove_process(
+    Swap *swap,
+    int pid
+);
+
 #endif

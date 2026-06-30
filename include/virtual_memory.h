@@ -123,4 +123,9 @@ bool virtual_memory_validate(
     const VirtualMemory *memory
 );
 
+int virtual_memory_release_process(
+    VirtualMemory *memory,
+    Process *process
+);
+
 #endif
