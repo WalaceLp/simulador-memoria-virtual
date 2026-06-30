@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include "cli.h"
+#include "csv_export.h"
 #include "process.h"
 #include "trace.h"
 #include "virtual_memory.h"
@@ -20,6 +21,17 @@ static void print_simulation_configuration(
     printf("Entradas da TLB: %zu\n", options->tlb_entries);
     printf("Slots de swap: %zu\n", options->swap_slots);
     printf("Arquivo de swap: %s\n", options->swap_path);
+
+    if (options->csv_path != NULL) {
+        printf("Arquivo CSV: %s\n", options->csv_path);
+
+        printf(
+            "Modo do CSV: %s\n",
+            options->csv_append
+                ? "acrescentar"
+                : "sobrescrever"
+        );
+    }
 }
 
 static void print_simulation_results(
@@ -202,6 +214,34 @@ int main(int argc, char **argv)
         memory,
         processed_accesses
     );
+
+    if (options.csv_path != NULL) {
+        int export_result = csv_export_result(
+            options.csv_path,
+            &options,
+            memory,
+            processed_accesses,
+            options.csv_append
+        );
+
+        if (export_result != 0) {
+            fprintf(
+                stderr,
+                "Erro: nao foi possivel exportar o CSV '%s'.\n",
+                options.csv_path
+            );
+
+            process_destroy(process);
+            virtual_memory_destroy(memory);
+
+            return EXIT_FAILURE;
+        }
+
+        printf(
+            "\nResultados exportados para: %s\n",
+            options.csv_path
+        );
+    }
 
     process_destroy(process);
     virtual_memory_destroy(memory);

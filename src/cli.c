@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,7 @@ void cli_options_init(CliOptions *options)
 
     options->trace_path = NULL;
     options->swap_path = DEFAULT_SWAP_PATH;
+    options->csv_path = NULL;
 
     options->frame_count = DEFAULT_FRAME_COUNT;
     options->tlb_entries = DEFAULT_TLB_ENTRIES;
@@ -30,6 +32,7 @@ void cli_options_init(CliOptions *options)
     options->policy = REPLACEMENT_FIFO;
 
     options->remove_swap_on_destroy = true;
+    options->csv_append = true;
     options->show_help = false;
 }
 
@@ -182,6 +185,11 @@ int cli_parse(
             continue;
         }
 
+        if (strcmp(argument, "--csv-overwrite") == 0) {
+            options->csv_append = false;
+            continue;
+        }
+
         if (strcmp(argument, "--trace") == 0) {
             if (!cli_requires_value(index, argc)) {
                 return -1;
@@ -197,6 +205,15 @@ int cli_parse(
             }
 
             options->swap_path = argv[++index];
+            continue;
+        }
+
+        if (strcmp(argument, "--csv") == 0) {
+            if (!cli_requires_value(index, argc)) {
+                return -1;
+            }
+
+            options->csv_path = argv[++index];
             continue;
         }
 
@@ -298,6 +315,8 @@ void cli_print_usage(const char *program_name)
         "  --swap <arquivo>        Arquivo de swap\n"
         "  --swap-slots <numero>   Slots do swap, padrao: %d\n"
         "  --pid <numero>          PID simulado, padrao: %d\n"
+        "  --csv <arquivo>         Exporta resultados para CSV\n"
+        "  --csv-overwrite         Sobrescreve o CSV em vez de anexar\n"
         "  --keep-swap             Nao remove o swap ao finalizar\n"
         "  --help, -h              Exibe esta ajuda\n",
         name,

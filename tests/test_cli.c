@@ -12,6 +12,7 @@ static void test_default_values(void)
 
     assert(options.trace_path == NULL);
     assert(options.swap_path != NULL);
+    assert(options.csv_path == NULL);
 
     assert(options.frame_count == 4);
     assert(options.tlb_entries == 16);
@@ -21,6 +22,7 @@ static void test_default_values(void)
     assert(options.policy == REPLACEMENT_FIFO);
 
     assert(options.remove_swap_on_destroy);
+    assert(options.csv_append);
     assert(!options.show_help);
 }
 
@@ -50,7 +52,12 @@ static void test_minimum_valid_arguments(void)
     );
 
     assert(options.frame_count == 4);
+    assert(options.tlb_entries == 16);
+    assert(options.swap_slots == 64);
+    assert(options.pid == 1);
     assert(options.policy == REPLACEMENT_FIFO);
+    assert(options.csv_path == NULL);
+    assert(options.csv_append);
 }
 
 static void test_all_arguments(void)
@@ -71,7 +78,10 @@ static void test_all_arguments(void)
         "128",
         "--pid",
         "42",
-        "--keep-swap"
+        "--keep-swap",
+        "--csv",
+        "resultados.csv",
+        "--csv-overwrite"
     };
 
     CliOptions options;
@@ -94,13 +104,6 @@ static void test_all_arguments(void)
         ) == 0
     );
 
-    assert(options.frame_count == 8);
-    assert(options.tlb_entries == 32);
-    assert(options.swap_slots == 128);
-    assert(options.pid == 42);
-
-    assert(options.policy == REPLACEMENT_AGING);
-
     assert(
         strcmp(
             options.swap_path,
@@ -108,7 +111,23 @@ static void test_all_arguments(void)
         ) == 0
     );
 
+    assert(
+        strcmp(
+            options.csv_path,
+            "resultados.csv"
+        ) == 0
+    );
+
+    assert(options.frame_count == 8);
+    assert(options.tlb_entries == 32);
+    assert(options.swap_slots == 128);
+    assert(options.pid == 42);
+
+    assert(options.policy == REPLACEMENT_AGING);
+
     assert(!options.remove_swap_on_destroy);
+    assert(!options.csv_append);
+    assert(!options.show_help);
 }
 
 static void test_each_policy(void)
@@ -156,11 +175,110 @@ static void test_each_policy(void)
     }
 }
 
-static void test_help(void)
+static void test_csv_append_by_default(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--csv",
+        "resultados.csv"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            5,
+            argv,
+            &options
+        ) == 0
+    );
+
+    assert(options.csv_path != NULL);
+
+    assert(
+        strcmp(
+            options.csv_path,
+            "resultados.csv"
+        ) == 0
+    );
+
+    assert(options.csv_append);
+}
+
+static void test_csv_overwrite(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--csv",
+        "resultados.csv",
+        "--csv-overwrite"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            6,
+            argv,
+            &options
+        ) == 0
+    );
+
+    assert(options.csv_path != NULL);
+    assert(!options.csv_append);
+}
+
+static void test_keep_swap(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--keep-swap"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            4,
+            argv,
+            &options
+        ) == 0
+    );
+
+    assert(!options.remove_swap_on_destroy);
+}
+
+static void test_help_long_option(void)
 {
     char *argv[] = {
         "vmsim",
         "--help"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            2,
+            argv,
+            &options
+        ) == 1
+    );
+
+    assert(options.show_help);
+}
+
+static void test_help_short_option(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "-h"
     };
 
     CliOptions options;
@@ -195,6 +313,64 @@ static void test_missing_trace(void)
     );
 }
 
+static void test_missing_trace_value(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            2,
+            argv,
+            &options
+        ) == -1
+    );
+}
+
+static void test_missing_csv_value(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--csv"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            4,
+            argv,
+            &options
+        ) == -1
+    );
+}
+
+static void test_missing_policy_value(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--policy"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            4,
+            argv,
+            &options
+        ) == -1
+    );
+}
+
 static void test_invalid_number(void)
 {
     char *argv[] = {
@@ -216,7 +392,49 @@ static void test_invalid_number(void)
     );
 }
 
-static void test_zero_value(void)
+static void test_negative_number(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--frames",
+        "-1"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            5,
+            argv,
+            &options
+        ) == -1
+    );
+}
+
+static void test_zero_frame_count(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--frames",
+        "0"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            5,
+            argv,
+            &options
+        ) == -1
+    );
+}
+
+static void test_zero_tlb_entries(void)
 {
     char *argv[] = {
         "vmsim",
@@ -235,6 +453,71 @@ static void test_zero_value(void)
             &options
         ) == -1
     );
+}
+
+static void test_zero_swap_slots(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--swap-slots",
+        "0"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            5,
+            argv,
+            &options
+        ) == -1
+    );
+}
+
+static void test_invalid_pid(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--pid",
+        "-5"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            5,
+            argv,
+            &options
+        ) == -1
+    );
+}
+
+static void test_zero_pid_is_valid(void)
+{
+    char *argv[] = {
+        "vmsim",
+        "--trace",
+        "trace.txt",
+        "--pid",
+        "0"
+    };
+
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            5,
+            argv,
+            &options
+        ) == 0
+    );
+
+    assert(options.pid == 0);
 }
 
 static void test_invalid_policy(void)
@@ -278,18 +561,56 @@ static void test_unknown_argument(void)
     );
 }
 
+static void test_null_arguments(void)
+{
+    CliOptions options;
+
+    assert(
+        cli_parse(
+            0,
+            NULL,
+            &options
+        ) == -1
+    );
+
+    char *argv[] = {
+        "vmsim"
+    };
+
+    assert(
+        cli_parse(
+            1,
+            argv,
+            NULL
+        ) == -1
+    );
+}
+
 int main(void)
 {
     test_default_values();
     test_minimum_valid_arguments();
     test_all_arguments();
     test_each_policy();
-    test_help();
+    test_csv_append_by_default();
+    test_csv_overwrite();
+    test_keep_swap();
+    test_help_long_option();
+    test_help_short_option();
     test_missing_trace();
+    test_missing_trace_value();
+    test_missing_csv_value();
+    test_missing_policy_value();
     test_invalid_number();
-    test_zero_value();
+    test_negative_number();
+    test_zero_frame_count();
+    test_zero_tlb_entries();
+    test_zero_swap_slots();
+    test_invalid_pid();
+    test_zero_pid_is_valid();
     test_invalid_policy();
     test_unknown_argument();
+    test_null_arguments();
 
     printf("Todos os testes de cli passaram.\n");
 

@@ -9,6 +9,7 @@
 typedef struct {
     const char *trace_path;
     const char *swap_path;
+    const char *csv_path;
 
     size_t frame_count;
     size_t tlb_entries;
@@ -19,6 +20,7 @@ typedef struct {
     ReplacementPolicyType policy;
 
     bool remove_swap_on_destroy;
+    bool csv_append;
     bool show_help;
 } CliOptions;
 
