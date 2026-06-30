@@ -1,12 +1,20 @@
 CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Werror -Iinclude -g
 
+REPLACEMENT_SOURCES = \
+	src/replacement/replacement.c \
+	src/replacement/fifo.c \
+	src/replacement/lru.c \
+	src/replacement/clock.c \
+	src/replacement/aging.c
+
 COMMON_SOURCES = \
 	src/address.c \
 	src/page_table.c \
 	src/process.c \
 	src/physical_memory.c \
-	src/virtual_memory.c
+	src/virtual_memory.c \
+	$(REPLACEMENT_SOURCES)
 
 .PHONY: all test stress clean valgrind
 
@@ -15,6 +23,7 @@ all: bin/vmsim
 bin/vmsim: src/main.c $(COMMON_SOURCES)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) \
+		-Isrc/replacement \
 		src/main.c \
 		$(COMMON_SOURCES) \
 		-o bin/vmsim
@@ -24,12 +33,14 @@ test: \
 	bin/test_page_table \
 	bin/test_process \
 	bin/test_physical_memory \
-	bin/test_virtual_memory
+	bin/test_virtual_memory \
+	bin/test_replacement
 	./bin/test_address
 	./bin/test_page_table
 	./bin/test_process
 	./bin/test_physical_memory
 	./bin/test_virtual_memory
+	./bin/test_replacement
 
 bin/test_address: tests/test_address.c src/address.c
 	@mkdir -p bin
@@ -76,9 +87,20 @@ bin/test_virtual_memory: \
 	$(COMMON_SOURCES)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) \
+		-Isrc/replacement \
 		tests/test_virtual_memory.c \
 		$(COMMON_SOURCES) \
 		-o bin/test_virtual_memory
+
+bin/test_replacement: \
+	tests/test_replacement.c \
+	$(REPLACEMENT_SOURCES)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) \
+		-Isrc/replacement \
+		tests/test_replacement.c \
+		$(REPLACEMENT_SOURCES) \
+		-o bin/test_replacement
 
 stress:
 	@echo "Testes de estresse ainda não implementados."
@@ -100,6 +122,10 @@ valgrind: test
 		--show-leak-kinds=all \
 		--error-exitcode=1 \
 		./bin/test_virtual_memory
+	valgrind --leak-check=full \
+		--show-leak-kinds=all \
+		--error-exitcode=1 \
+		./bin/test_replacement
 
 clean:
 	rm -rf bin build
