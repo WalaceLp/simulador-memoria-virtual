@@ -46,7 +46,7 @@ Process *process_fork(
         return NULL;
     }
 
-    child->page_table = page_table_retain(
+    child->page_table = page_table_clone_shared(
         parent->page_table
     );
 

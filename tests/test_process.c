@@ -39,7 +39,6 @@ static void test_process_page_table(void)
     PageTable *table = process_get_page_table(process);
 
     assert(table != NULL);
-
     assert(page_table_map(table, 0x1000ULL, 5) == 0);
 
     const PageTableEntry *entry =
@@ -87,7 +86,19 @@ static void test_processes_have_independent_page_tables(void)
     process_destroy(second);
 }
 
-static void test_fork_shares_page_table(void)
+static void test_invalid_fork(void)
+{
+    Process *parent = process_create(1);
+
+    assert(parent != NULL);
+
+    assert(process_fork(NULL, 2) == NULL);
+    assert(process_fork(parent, -1) == NULL);
+
+    process_destroy(parent);
+}
+
+static void test_fork_shares_root_initially(void)
 {
     Process *parent = process_create(1);
 
@@ -110,11 +121,28 @@ static void test_fork_shares_page_table(void)
     PageTable *child_table =
         process_get_page_table(child);
 
-    assert(parent_table == child_table);
+    /*
+     * Pai e filho possuem objetos PageTable diferentes.
+     */
+    assert(parent_table != child_table);
 
-    assert(page_table_reference_count(
+    /*
+     * Entretanto, a raiz da Trie é inicialmente compartilhada.
+     */
+    assert(page_table_shares_root(
+        parent_table,
+        child_table
+    ));
+
+    assert(page_table_root_reference_count(
         parent_table
     ) == 2);
+
+    const PageTableEntry *parent_entry =
+        page_table_lookup(
+            parent_table,
+            0x1000ULL
+        );
 
     const PageTableEntry *child_entry =
         page_table_lookup(
@@ -122,15 +150,18 @@ static void test_fork_shares_page_table(void)
             0x1000ULL
         );
 
+    assert(parent_entry != NULL);
     assert(child_entry != NULL);
+
+    /*
+     * Antes de qualquer modificação, a entrada também é
+     * compartilhada entre pai e filho.
+     */
+    assert(parent_entry == child_entry);
+    assert(parent_entry->frame_number == 7);
     assert(child_entry->frame_number == 7);
 
     process_destroy(child);
-
-    assert(page_table_reference_count(
-        parent_table
-    ) == 1);
-
     process_destroy(parent);
 }
 
@@ -140,11 +171,11 @@ static void test_destroy_parent_before_child(void)
 
     assert(parent != NULL);
 
-    PageTable *table =
+    PageTable *parent_table =
         process_get_page_table(parent);
 
     assert(page_table_map(
-        table,
+        parent_table,
         0x2000ULL,
         9
     ) == 0);
@@ -153,12 +184,27 @@ static void test_destroy_parent_before_child(void)
 
     assert(child != NULL);
 
-    process_destroy(parent);
-
     PageTable *child_table =
         process_get_page_table(child);
 
-    assert(page_table_reference_count(
+    assert(parent_table != child_table);
+
+    assert(page_table_shares_root(
+        parent_table,
+        child_table
+    ));
+
+    assert(page_table_root_reference_count(
+        child_table
+    ) == 2);
+
+    process_destroy(parent);
+
+    /*
+     * Após destruir o pai, o filho passa a ser o único
+     * proprietário da raiz.
+     */
+    assert(page_table_root_reference_count(
         child_table
     ) == 1);
 
@@ -174,29 +220,93 @@ static void test_destroy_parent_before_child(void)
     process_destroy(child);
 }
 
-static void test_invalid_fork(void)
+static void test_child_map_triggers_copy_on_write(void)
 {
-    Process *parent = process_create(1);
+    Process *parent = process_create(10);
 
     assert(parent != NULL);
 
-    assert(process_fork(NULL, 2) == NULL);
-    assert(process_fork(parent, -1) == NULL);
+    PageTable *parent_table =
+        process_get_page_table(parent);
 
+    assert(page_table_map(
+        parent_table,
+        0x1000ULL,
+        3
+    ) == 0);
+
+    Process *child = process_fork(parent, 11);
+
+    assert(child != NULL);
+
+    PageTable *child_table =
+        process_get_page_table(child);
+
+    assert(page_table_shares_root(
+        parent_table,
+        child_table
+    ));
+
+    /*
+     * A escrita do filho deve criar um caminho privado.
+     */
+    assert(page_table_map(
+        child_table,
+        0x2000ULL,
+        8
+    ) == 0);
+
+    assert(!page_table_shares_root(
+        parent_table,
+        child_table
+    ));
+
+    const PageTableEntry *child_new =
+        page_table_lookup(
+            child_table,
+            0x2000ULL
+        );
+
+    assert(child_new != NULL);
+    assert(child_new->frame_number == 8);
+
+    /*
+     * O pai não deve enxergar o novo mapeamento do filho.
+     */
+    assert(page_table_lookup(
+        parent_table,
+        0x2000ULL
+    ) == NULL);
+
+    /*
+     * O mapeamento anterior deve continuar existindo
+     * nas duas tabelas.
+     */
+    assert(page_table_lookup(
+        parent_table,
+        0x1000ULL
+    ) != NULL);
+
+    assert(page_table_lookup(
+        child_table,
+        0x1000ULL
+    ) != NULL);
+
+    process_destroy(child);
     process_destroy(parent);
 }
 
-static void test_shared_table_rejects_mutation(void)
+static void test_child_remap_does_not_change_parent(void)
 {
     Process *parent = process_create(20);
 
     assert(parent != NULL);
 
-    PageTable *table =
+    PageTable *parent_table =
         process_get_page_table(parent);
 
     assert(page_table_map(
-        table,
+        parent_table,
         0x3000ULL,
         4
     ) == 0);
@@ -205,35 +315,249 @@ static void test_shared_table_rejects_mutation(void)
 
     assert(child != NULL);
 
-    PageTable *shared =
+    PageTable *child_table =
         process_get_page_table(child);
 
-    assert(page_table_reference_count(
-        shared
-    ) == 2);
+    assert(page_table_map(
+        child_table,
+        0x3000ULL,
+        15
+    ) == 0);
+
+    const PageTableEntry *parent_entry =
+        page_table_lookup(
+            parent_table,
+            0x3000ULL
+        );
+
+    const PageTableEntry *child_entry =
+        page_table_lookup(
+            child_table,
+            0x3000ULL
+        );
+
+    assert(parent_entry != NULL);
+    assert(child_entry != NULL);
+
+    assert(parent_entry->frame_number == 4);
+    assert(child_entry->frame_number == 15);
 
     /*
-     * Até o copy-on-write ser implementado,
-     * alterações em uma tabela compartilhada
-     * são rejeitadas com -2.
+     * A entrada deve ter sido copiada antes da alteração.
      */
+    assert(parent_entry != child_entry);
+
+    process_destroy(child);
+    process_destroy(parent);
+}
+
+static void test_child_unmap_does_not_change_parent(void)
+{
+    Process *parent = process_create(30);
+
+    assert(parent != NULL);
+
+    PageTable *parent_table =
+        process_get_page_table(parent);
+
     assert(page_table_map(
-        shared,
+        parent_table,
         0x4000ULL,
-        5
-    ) == -2);
+        6
+    ) == 0);
+
+    assert(page_table_map(
+        parent_table,
+        0x5000ULL,
+        7
+    ) == 0);
+
+    Process *child = process_fork(parent, 31);
+
+    assert(child != NULL);
+
+    PageTable *child_table =
+        process_get_page_table(child);
 
     assert(page_table_unmap(
-        shared,
-        0x3000ULL
-    ) == -2);
+        child_table,
+        0x4000ULL
+    ) == 0);
+
+    /*
+     * O mapeamento foi removido apenas da tabela do filho.
+     */
+    assert(page_table_lookup(
+        child_table,
+        0x4000ULL
+    ) == NULL);
 
     assert(page_table_lookup(
-        shared,
-        0x3000ULL
+        parent_table,
+        0x4000ULL
+    ) != NULL);
+
+    /*
+     * O segundo mapeamento continua disponível nos dois.
+     */
+    assert(page_table_lookup(
+        child_table,
+        0x5000ULL
+    ) != NULL);
+
+    assert(page_table_lookup(
+        parent_table,
+        0x5000ULL
     ) != NULL);
 
     process_destroy(child);
+    process_destroy(parent);
+}
+
+static void test_parent_modification_does_not_change_child(void)
+{
+    Process *parent = process_create(40);
+
+    assert(parent != NULL);
+
+    PageTable *parent_table =
+        process_get_page_table(parent);
+
+    assert(page_table_map(
+        parent_table,
+        0x6000ULL,
+        10
+    ) == 0);
+
+    Process *child = process_fork(parent, 41);
+
+    assert(child != NULL);
+
+    PageTable *child_table =
+        process_get_page_table(child);
+
+    assert(page_table_map(
+        parent_table,
+        0x7000ULL,
+        11
+    ) == 0);
+
+    assert(page_table_lookup(
+        parent_table,
+        0x7000ULL
+    ) != NULL);
+
+    assert(page_table_lookup(
+        child_table,
+        0x7000ULL
+    ) == NULL);
+
+    assert(page_table_lookup(
+        child_table,
+        0x6000ULL
+    ) != NULL);
+
+    process_destroy(parent);
+
+    /*
+     * A tabela do filho deve continuar válida após a
+     * destruição do processo pai.
+     */
+    const PageTableEntry *child_entry =
+        page_table_lookup(
+            child_table,
+            0x6000ULL
+        );
+
+    assert(child_entry != NULL);
+    assert(child_entry->frame_number == 10);
+
+    process_destroy(child);
+}
+
+static void test_multiple_forks(void)
+{
+    Process *parent = process_create(50);
+
+    assert(parent != NULL);
+
+    PageTable *parent_table =
+        process_get_page_table(parent);
+
+    assert(page_table_map(
+        parent_table,
+        0x8000ULL,
+        12
+    ) == 0);
+
+    Process *first_child =
+        process_fork(parent, 51);
+
+    Process *second_child =
+        process_fork(parent, 52);
+
+    assert(first_child != NULL);
+    assert(second_child != NULL);
+
+    PageTable *first_table =
+        process_get_page_table(first_child);
+
+    PageTable *second_table =
+        process_get_page_table(second_child);
+
+    assert(page_table_root_reference_count(
+        parent_table
+    ) == 3);
+
+    assert(page_table_shares_root(
+        parent_table,
+        first_table
+    ));
+
+    assert(page_table_shares_root(
+        parent_table,
+        second_table
+    ));
+
+    /*
+     * Apenas o primeiro filho modifica sua tabela.
+     */
+    assert(page_table_map(
+        first_table,
+        0x9000ULL,
+        13
+    ) == 0);
+
+    assert(page_table_lookup(
+        first_table,
+        0x9000ULL
+    ) != NULL);
+
+    assert(page_table_lookup(
+        parent_table,
+        0x9000ULL
+    ) == NULL);
+
+    assert(page_table_lookup(
+        second_table,
+        0x9000ULL
+    ) == NULL);
+
+    /*
+     * Pai e segundo filho continuam compartilhando a raiz.
+     */
+    assert(page_table_shares_root(
+        parent_table,
+        second_table
+    ));
+
+    assert(!page_table_shares_root(
+        parent_table,
+        first_table
+    ));
+
+    process_destroy(first_child);
+    process_destroy(second_child);
     process_destroy(parent);
 }
 
@@ -245,10 +569,14 @@ int main(void)
     test_process_page_table();
     test_processes_have_independent_page_tables();
 
-    test_fork_shares_page_table();
-    test_destroy_parent_before_child();
     test_invalid_fork();
-    test_shared_table_rejects_mutation();
+    test_fork_shares_root_initially();
+    test_destroy_parent_before_child();
+    test_child_map_triggers_copy_on_write();
+    test_child_remap_does_not_change_parent();
+    test_child_unmap_does_not_change_parent();
+    test_parent_modification_does_not_change_child();
+    test_multiple_forks();
 
     printf("Todos os testes de process passaram.\n");
 

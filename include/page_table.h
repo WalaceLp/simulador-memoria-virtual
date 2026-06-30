@@ -9,18 +9,36 @@ typedef struct PageTable PageTable;
 
 typedef struct {
     uint32_t frame_number;
+
     bool present;
     bool writable;
     bool dirty;
     bool referenced;
     bool copy_on_write;
+
+    /*
+     * Quantidade de nós-folha que compartilham esta entrada.
+     * É utilizado internamente pelo copy-on-write.
+     */
+    size_t reference_count;
 } PageTableEntry;
 
 PageTable *page_table_create(void);
 
-PageTable *page_table_retain(PageTable *table);
+/*
+ * Cria outro objeto PageTable, inicialmente compartilhando
+ * a mesma raiz e as mesmas subárvores.
+ */
+PageTable *page_table_clone_shared(
+    const PageTable *source
+);
 
-size_t page_table_reference_count(
+bool page_table_shares_root(
+    const PageTable *first,
+    const PageTable *second
+);
+
+size_t page_table_root_reference_count(
     const PageTable *table
 );
 
